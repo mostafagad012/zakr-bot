@@ -1,6 +1,7 @@
 """ترجمة النصوص + تلخيص PDF."""
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from aiogram import F, Router
@@ -92,11 +93,18 @@ async def _do_translate(message: Message, text: str, target: str) -> None:
         return
 
     await notice.delete()
-    await message.answer(
-        texts.header("translate", f"الترجمة إلى {translate_service.LANG_NAMES.get(target, target)}")
-        + f"\n\n{escape(result[:4000])}",
-        parse_mode="HTML",
+    # كان `result[:4000]` يقتطع الترجمة **صامتًا**: نص طويل يُترجم كاملًا
+    # ثم يُعرض نصفه بلا أي إشارة. الآن تُقسَّم على رسائل، وإن قُسّمت
+    # يقول للمستخدم ذلك صراحةً.
+    head = texts.header(
+        "translate", f"الترجمة إلى {translate_service.LANG_NAMES.get(target, target)}"
     )
+    body = escape(result)
+    parts = texts.split_for_send(head + "\n\n" + body)
+    if len(parts) > 1:
+        parts[0] += texts.split_note(len(head) + len(body) + 2)
+    for part in parts:
+        await message.answer(part, parse_mode="HTML")
 
 
 # --------------------------------------------------------------- تلخيص PDF
@@ -105,15 +113,10 @@ async def cb_summarize_ask(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(SummarizeFlow.waiting_pdf)
     await callback.message.answer(
         texts.header("summarize", subtitle="أرسل ملف PDF الآن وسأستخرج أهم النقاط.")
-        + "\n\nℹ️ ملاحظة: يعمل مع ملفات PDF النصية، وليس المصوّرة (التي تحتاج OCR).",
+        + "\n\nℹ️ ملاحظة: يعمل مع ملفات PDF النصية، وليس المصوّرة.",
         parse_mode="HTML",
     )
     await callback.answer()
-
-
-async def cmd_summarize(message: Message, state: FSMContext) -> None:
-    await state.set_state(SummarizeFlow.waiting_pdf)
-    await message.answer("📝 أرسل ملف PDF لتلخيصه:")
 
 
 @router.message(F.document, SummarizeFlow.waiting_pdf)
@@ -134,26 +137,27 @@ async def on_pdf_for_summary(message: Message, state: FSMContext) -> None:
         await message.answer("⚠️ تعذّر تنزيل الملف.")
         return
 
-    extracted = pdf_service.extract_text(data)
+    extracted = await asyncio.to_thread(pdf_service.extract_text, data)
     if not extracted.text.strip():
         await notice.delete()
         await message.answer(
             "⚠️ لم أتمكّن من استخراج نص من هذا الملف.\n"
-            "غالبًا هو ملف مصوّر (سكانر) ويحتاج OCR."
+            "غالبًا هو ملف مصوّر (سكانر) — ارفعه من «رفع ملف» ليُقرأ "
+            "بالذكاء الاصطناعي، ثم ترجمه."
         )
         return
 
     summary = summarizer.summarize(extracted.text, max_sentences=8)
     await notice.delete()
-    await message.answer(
+    for part in texts.split_for_send(
         texts.header("summarize", f"ملخص {escape(message.document.file_name)}") + "\n"
         + texts.info_block([
             ("📄", "الصفحات", extracted.pages),
             ("🧩", "الجمل المستخدمة", f"{summary.sentences_used}/{summary.total_sentences}"),
         ])
-        + f"\n\n{escape(summary.text)}",
-        parse_mode="HTML",
-    )
+        + f"\n\n{escape(summary.text)}"
+    ):
+        await message.answer(part, parse_mode="HTML")
 
 
 @router.message(F.text, SummarizeFlow.waiting_pdf)
@@ -164,5 +168,9 @@ async def on_text_for_summary(message: Message, state: FSMContext) -> None:
     if not summary.text:
         await message.answer("⚠️ النص قصير جدًا ولا يحتاج تلخيصًا.")
         return
-    await message.answer(
-        texts.header("summarize", "الملخص") + f"\n\n{escape(summary.text)}", parse_mode="HTML")
+    # `max_sentences=8` مع `max_chars=1800` يجعل التجاوز نظريًا، لكن الحدّ
+    # لا يُترك للحظّ: نفس دالة التقسيم تُستخدم في كل ردّ نصّي طويل.
+    for part in texts.split_for_send(
+        texts.header("summarize", "الملخص") + f"\n\n{escape(summary.text)}"
+    ):
+        await message.answer(part, parse_mode="HTML")

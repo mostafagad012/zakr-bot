@@ -4,10 +4,8 @@
 يُستدعى من `setup.sh` و`setup.py` معًا (مصدر واحد للحقيقة).
 
 الفلسفة: **إجباري لا اختياري.**
-  • على Wispbyte/Pterodactyl: يفوّض إلى `self_install.py` لتثبيت المجموعة
-    الكاملة (`requirements-wispbyte.txt`) وأدوات OCR وبيانات اللغات، ثم يفشل
-    بوضوح إذا تعذّر أي مكوّن.
-  • على السيرفرات الأخرى: تُثبَّت حزم `requirements.txt` الأساسية.
+  • على سيرفر عادي (Wispbyte / VPS / Vercel): كل حزمة في `requirements.txt`
+    **لازم** تُثبَّت. لو فشلت واحدة، يفشل التثبيت ويُذكر اسمها وسببها.
   • على Termux/أندرويد فقط: نستخدم حزم `pkg` لما لا عجلة له، ونُعلن ما
     يستحيل صراحةً (onnxruntime) — لأن البناء على الجوال مستحيل فعلًا.
 
@@ -17,43 +15,13 @@
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 REQ = ROOT / "requirements.txt"
-
-
-def is_wispbyte() -> bool:
-    """كشف Wispbyte/Pterodactyl حتى لو استُدعي هذا الملف مباشرةً."""
-    import os
-    return (
-        os.environ.get("ZAKR_WISPBYTE_MODE") == "1"
-        or os.environ.get("WISPBYTE") == "1"
-        or Path("/home/container").is_dir()
-    )
-
-
-def run_wispbyte_installer() -> int:
-    """لا تسمح لمسار التثبيت القديم بتجاوز مجموعة Wispbyte الكاملة."""
-    import os
-    import subprocess
-
-    installer = ROOT / "self_install.py"
-    if not installer.is_file():
-        bad("self_install.py مفقود — لا يمكن تثبيت مجموعة Wispbyte الكاملة.")
-        return 1
-    os.environ["ZAKR_WISPBYTE_MODE"] = "1"
-    os.environ["ZAKR_INSTALL_OCR"] = "1"
-    os.environ.pop("ZAKR_SKIP_OCR", None)
-    info("Wispbyte: تحويل التثبيت إلى self_install.py (كل المكتبات + Tesseract + Poppler + اللغات).")
-    try:
-        proc = subprocess.run([sys.executable, "-u", str(installer)], cwd=str(ROOT))
-    except OSError as exc:
-        bad(f"تعذّر تشغيل self_install.py: {exc}")
-        return 1
-    return proc.returncode or 0
 
 # أدوات مشتركة (طباعة/منصّة) — كانت منسوخة في ثلاثة ملفات
 sys.path.insert(0, str(ROOT))
@@ -91,18 +59,48 @@ TERMUX_PKG_MAP = {
 }
 
 
-def parse_requirements(path: Path = REQ) -> list[str]:
-    """يقرأ requirements.txt ويرجع سطور الحزم الفعّالة (بلا تعليقات)."""
+def parse_requirements(path: Path = REQ, *, _seen: set[Path] | None = None) -> list[str]:
+    """يقرأ requirements ويعيد سطور الحزم الفعّالة — مع دعم سطر التضمين `-r`.
+
+    ⚠️ العِلّة التي أُصلحت: ملف `requirements.txt` كان يضمّ `requirements-ocr.txt`
+    بسطر `-r`. القارئ القديم كان يعيد `-r` **كأنه اسم حزمة**، فيمرّره إلى pip
+    الذي يفشل أو — أسوأ — يتخطّاه بصمت فلا تُثبَّت الحزم إطلاقًا. الدعم باقٍ
+    لأي ملف تضمين مستقبلي (مثل `requirements-migrate.txt`).
+
+    ملاحظة: `requirements-ocr.txt` نفسه أُزيل مع إزالة الـOCR، فلم يبقَ
+    ما يتخطّاه `ZAKR_MINIMAL=1` — لكن المتغيّر يبقى مقبولًا كي لا تنكسر
+    إعدادات لوحات قائمة.
+    """
     if not path.is_file():
         # ⚠️ لا تستخدم raise SystemExit("نص") — كود الخروج يصبح 0 (نجاح زائف)
         bad(f"لم أجد {path}")
         info("شغّل السكربت من مجلد المشروع (حيث requirements.txt).")
         raise SystemExit(1)
+
+    seen = _seen if _seen is not None else set()
+    resolved = path.resolve()
+    if resolved in seen:                      # حماية من تضمين دائري
+        return []
+    seen.add(resolved)
+
+    minimal = os.environ.get("ZAKR_MINIMAL") == "1"
     out: list[str] = []
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.split(" #", 1)[0].strip()
         if not line or line.startswith("#"):
             continue
+        # سطر تضمين: -r file / --requirement file
+        if line.startswith(("-r ", "--requirement ")):
+            target = line.split(maxsplit=1)[1].strip()
+            child = (path.parent / target)
+            # احتياط لتوافق خلفي: لو بقي ملف ocr في نسخة قديمة، لا نثبّته
+            if minimal and "ocr" in target.lower():
+                info(f"تخطّي {target} (ZAKR_MINIMAL=1) — البوت يعمل بلا قراءة الصور")
+                continue
+            out.extend(parse_requirements(child, _seen=seen))
+            continue
+        if ":" in line and not line.startswith(("http:", "https:")):
+            line = line.replace(":", "", 1)   # صيغة قديمة غير مدعومة
         out.append(line)
     return out
 
@@ -220,15 +218,24 @@ def termux_take_from_pkg(py: str, targets: list[str]) -> list[str]:
     return done
 
 
+USAGE = """الاستخدام:
+    python setup_deps.py             يثبّت الحاجيات ويعرض التفاصيل
+    python setup_deps.py --quiet     يثبّت بصمت (يُستدعى من main.py)
+    python setup_deps.py --check     يتحقّق فقط بلا تثبيت
+    python setup_deps.py --help      هذه المساعدة
+
+يقرأ requirements.txt ويتحقّق من
+كل حزمة بالاستيراد الفعلي لا بالسؤال عن وجودها في pip.
+"""
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if "-h" in argv or "--help" in argv:
+        print(USAGE)
+        return 0
     quiet_mode = "--quiet" in argv
     py = sys.executable
-
-    # لا تسمح لمسارات setup.sh/setup.py القديمة باستخدام requirements.txt
-    # على Wispbyte؛ هذا كان سبب ظهور alembic كحزمة ناقصة رغم وجود ملف المجموعة الكاملة.
-    if is_wispbyte():
-        return run_wispbyte_installer()
 
     say()
     say(f"{C.dim}══════ تثبيت حاجيات «ذاكر» ══════{C.reset}")
@@ -303,6 +310,7 @@ def main(argv: list[str] | None = None) -> int:
         ("alembic", "alembic"),
         ("pypdf", "pypdf"),
         ("httpx", "httpx"),
+        ("openpyxl", "openpyxl"),
     ]
     OPTIONAL_MODULES = [
         ("Pillow", "PIL"),

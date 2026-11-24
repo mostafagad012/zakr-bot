@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from aiogram import F, Router
@@ -18,31 +19,25 @@ from ..services import ai, ai_usage, learner, pdf, tutor
 from ..states import TutorFlow
 from .helpers import ProgressReporter, back_button
 
+async def _safe_delete_msg(target) -> None:
+    """حذف رسالة حالة — التجميل لا يجوز أن يُسقط العمل."""
+    try:
+        await target.delete()
+    except Exception as exc:      # noqa: BLE001
+        log.debug("تعذّر حذف رسالة الحالة: %s", type(exc).__name__)
+
+
 log = logging.getLogger(__name__)
 
 router = Router(name="tutor")
 
-# حدّ الرسالة الواحدة في تيليجرام، ونترك هامشًا للترويسة
-SEND_LIMIT = 3800
+# التقسيم صار في `texts` — مصدر واحد يستخدمه tutor والترجمة والتلخيص.
+SEND_LIMIT = texts.SEND_LIMIT
 
 
 def _chunks_for_send(text: str) -> list[str]:
-    """يقسّم ردًا طويلًا إلى رسائل متتابعة عند حدود الكلمات."""
-    remaining = (text or "").strip()
-    if not remaining:
-        return []
-    parts: list[str] = []
-    while remaining:
-        if len(remaining) <= SEND_LIMIT:
-            parts.append(remaining)
-            break
-        window = remaining[:SEND_LIMIT]
-        cut = max(window.rfind("\n\n"), window.rfind("\n"), window.rfind(" "))
-        if cut < SEND_LIMIT // 2:
-            cut = SEND_LIMIT
-        parts.append(remaining[:cut].rstrip())
-        remaining = remaining[cut:].lstrip()
-    return parts
+    """يُبقي الاسم القديم عاملًا — التنفيذ في `texts.split_for_send`."""
+    return texts.split_for_send(text)
 
 
 async def _send_long(message: Message, body: str) -> None:
@@ -294,28 +289,25 @@ async def on_pdf(message: Message, db_user: User, db_session, state: FSMContext)
         except Exception as exc:  # حذف رسالة الحالة — تجميل لا يكسر العمل
             log.debug("تعذّر حذف رسالة الحالة: %s", type(exc).__name__)
 
-    extracted = pdf.extract_text(data)
+    extracted = await asyncio.to_thread(pdf.extract_text, data)
     text = extracted.text
     if not text.strip():
-        # ملف مصوّر: نجرّب OCR تلقائيًا بدل إبلاغ المستخدم بالفشل
-        ocr_notice = await message.answer("🔎 الملف مصوّر — جارٍ قراءته بـOCR…")
+        # ملف مصوّر: يُقرأ عبر وكيل الرؤية الذي اختاره المستخدم (مفتاحه هو)
+        notice = await message.answer("🔎 الملف مصوّر — جارٍ قراءته بالذكاء الاصطناعي…")
         try:
-            from ..services import ocr as ocr_service
-            result = await ocr_service.extract_text_from_pdf(data)
-            text = result.text
-        except Exception as exc:
-            log.info("تعذّر OCR للملخص: %s", type(exc).__name__)
-            text = ""
+            from .upload import _read_with_vision
+
+            text = await _read_with_vision(
+                message, db_user, db_session, data,
+                filename=name, mime="application/pdf") or ""
         finally:
-            try:
-                await ocr_notice.delete()
-            except Exception as exc:  # تجميل — لا يكسر التلخيص
-                log.debug("تعذّر حذف رسالة OCR: %s", type(exc).__name__)
+            await _safe_delete_msg(notice)
 
     if not text.strip():
         await message.answer(
             "⚠️ لم أتمكّن من استخراج نص من الملف.\n"
-            "لو الملف صور فقط فمحتاج OCR — تأكد من تثبيت tesseract على السيرفر."
+            "الملفات المصوّرة تُقرأ عبر وكيل ذكاء اصطناعي — أضف مفتاحك من "
+            "⚙️ إعدادات الذكاء الاصطناعي ثم أعد المحاولة."
         )
         return
 

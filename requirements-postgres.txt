@@ -1,3 +1,0 @@
-# Install only when DATABASE_URL uses PostgreSQL/Supabase.
--r requirements.txt
-asyncpg>=0.29

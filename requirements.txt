@@ -1,6 +1,35 @@
-# Runtime core only — small install for constrained panels (Wispbyte/Pterodactyl).
 aiogram>=3.13,<4
 SQLAlchemy[asyncio]>=2.0
 aiosqlite>=0.20
+# مشغّل PostgreSQL غير المتزامن — بدونه DATABASE_URL على Supabase لا يعمل
+asyncpg>=0.29
+alembic>=1.13
 pypdf>=5.0
+Pillow>=10.0
 httpx>=0.27
+
+# تصدير المكتبة إلى Excel
+openpyxl>=3.1
+
+# ── قراءة الملفات المصوّرة
+#  أُزيل مسار tesseract كليًا (كان يجلب ~120MB: onnxruntime + numpy +
+#  pytesseract + pdf2image، ويحتاج حزم نظام لا تُثبَّت بلا root). القراءة
+#  الآن عبر وكيل الرؤية الذي يختاره المستخدم بمفتاحه.
+#  PyMuPDF يرسم صفحات PDF إلى صور **داخل بايثون** — بلا poppler ولا أي
+#  برنامج نظام. هذا هو ما يجعل الميزة تعمل على لوحة بلا root.
+#
+#  ⚠️ السقف `<2` مقصود ولا يُرفع بلا قياس. PyMuPDF 2.x صار حزمة ضخمة:
+#  يسحب onnxruntime + numpy + pymupdf-layout + pymupdf4llm ≈ ٢٤٤ ميجا،
+#  ولا نستخدم منها شيئًا (نرسم صفحة إلى PNG فقط). 1.28.x = ٢٥ ميجا
+#  بلا أي تبعية. أُعيدت كل تبعيات «فكّ التواء الصور» التي أُزيلت مع
+#  الـOCR من الباب الخلفي عبر هذا الاعتماد وحده.
+PyMuPDF>=1.24,<2
+
+# اختياري: بحث دلالي بنموذج عصبي (يحتاج ~2 جيجا رام عند التحميل).
+# البوت يعمل بدونه تمامًا — يتراجع تلقائيًا إلى TF-IDF.
+# التفعيل: pip install fastembed  ثم  EMBEDDING_MODEL=...  في .env
+# (تركه غير مثبّت لا يكسر شيئًا: `bot/services/embeddings.py` يتحقق ويتجاوز)
+# fastembed>=0.3
+
+# ملاحظة: pytest **ليس** من حاجيات التشغيل — انتقل إلى requirements-dev.txt.
+# كان هنا فيُثبَّت على كل لوحة استضافة ويستهلك مساحة ووقتًا بلا فائدة.

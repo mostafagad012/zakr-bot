@@ -14,6 +14,7 @@ from ..services import catalog, files as files_service, search
 from ..services.files import human_size
 from .helpers import (
     back_button,
+    cb_data,
     escape,
     file_caption,
     slice_page,
@@ -22,13 +23,8 @@ from .helpers import (
 log = logging.getLogger(__name__)
 router = Router(name="library")
 
-MAX_CALLBACK = 60
-
-
-def _cd(value: str) -> str:
-    if len(value.encode()) > MAX_CALLBACK:
-        raise ValueError(f"callback_data طويل: {value}")
-    return value
+# الحارس انتقل إلى `helpers.cb_data` — نسخة واحدة بدل ثلاث.
+_cd = cb_data
 
 
 async def _edit(callback: CallbackQuery, text: str, markup: InlineKeyboardMarkup | None = None) -> None:
@@ -212,11 +208,13 @@ async def cb_subject_view(callback: CallbackQuery, db_session) -> None:
     stats = await catalog.subject_stats(db_session, subject_id)
     categories = await files_service.list_categories(db_session)
 
+    # استعلام تجميعي واحد بدل استعلام كامل لكل تصنيف — وكان العدّاد
+    # مقطوعًا عند ٥٠ بسبب limit في files_by_category (عِلّة عرض حقيقية).
+    counts = await files_service.category_counts(db_session, subject_id)
+
     builder = InlineKeyboardBuilder()
     for category in categories:
-        count = len(
-            await files_service.files_by_category(db_session, subject_id, category.id)
-        )
+        count = counts.get(category.id, 0)
         builder.row(InlineKeyboardButton(
             text=f"{category.icon or '📁'} {escape(category.name)} ({count})",
             callback_data=_cd(f"cat:view:{subject_id}:{category.id}:0"),

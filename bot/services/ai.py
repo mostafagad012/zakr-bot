@@ -435,41 +435,50 @@ def reset_settings() -> None:
     settings = env_settings
 
 
-def is_configured() -> bool:
-    """هل الطبقة جاهزة؟ (عنوان + موديل، ومفتاح إلا للمحلي)"""
-    provider = get_provider()
-    if provider.requires_key and not _api_key():
+def is_configured(*, provider: str | None = None, api_key: str | None = None) -> bool:
+    """هل الطبقة جاهزة؟ (عنوان + موديل، ومفتاح إلا للمحلي)
+
+    `provider`/`api_key` يقيسان **مزوّدًا بعينه بمفتاحه** لا المزوّد العام:
+    شاشة حفظ المفتاح تعرض حالة المفتاح الذي أدخله المستخدم الآن، فقياس
+    المزوّد العام هناك يجعل الرسالة تصف حالة أخرى غير التي أمامه.
+    """
+    if provider or api_key:
+        chosen = get_provider(provider)
+        if chosen.requires_key and not (api_key or key_for(chosen.key)):
+            return False
+        return bool((settings.ai_base_url or "").strip() or chosen.base_url)
+    current = get_provider()
+    if current.requires_key and not _api_key():
         return False
-    if not _base_url() or not _model():
-        return False
-    return True
+    return bool(_base_url() and _model())
 
 
-def status_text() -> str:
+def status_text(provider: str | None = None) -> str:
     """وصف مختصر للحالة — يُعرض في لوحة الإدارة."""
-    provider = get_provider()
-    if provider.requires_key and not _api_key():
+    chosen = get_provider(provider)
+    if provider:
+        if chosen.requires_key and not key_for(chosen.key):
+            return (
+                "⚠️ لا مفتاح محفوظ لهذا المزوّد\n"
+                f"المزوّد: {chosen.label}"
+                + (f"\nالمفتاح من: {chosen.key_url}" if chosen.key_url else "")
+            )
+        return f"✅ جاهز — {chosen.label} · الموديل: {_model()}"
+    if chosen.requires_key and not _api_key():
         return (
             "⚠️ الذكاء الاصطناعي غير مُعدّ\n"
-            f"المزوّد: {provider.label}\n"
+            f"المزوّد: {chosen.label}\n"
             "أضف AI_API_KEY في .env"
-            + (f"\nالمفتاح من: {provider.key_url}" if provider.key_url else "")
+            + (f"\nالمفتاح من: {chosen.key_url}" if chosen.key_url else "")
         )
     if not _base_url():
-        return f"⚠️ AI_BASE_URL مطلوب لمزوّد «{provider.label}»"
+        return f"⚠️ AI_BASE_URL مطلوب لمزوّد «{chosen.label}»"
     if not _model():
-        return f"⚠️ AI_MODEL مطلوب لمزوّد «{provider.label}»"
-    return f"✅ جاهز — {provider.label} · الموديل: {_model()}"
+        return f"⚠️ AI_MODEL مطلوب لمزوّد «{chosen.label}»"
+    return f"✅ جاهز — {chosen.label} · الموديل: {_model()}"
 
 
 # ------------------------------------------------------- حماية المحتوى
-_UNTRUSTED_OPEN = "<<<بداية المحتوى>>>"
-_UNTRUSTED_CLOSE = "<<<نهاية المحتوى>>>"
-
-_UNTRUSTED_OPEN = "<<<بداية المحتوى>>>"
-_UNTRUSTED_CLOSE = "<<<نهاية المحتوى>>>"
-
-
 _UNTRUSTED_OPEN = "<<<بداية المحتوى>>>"
 _UNTRUSTED_CLOSE = "<<<نهاية المحتوى>>>"
 
@@ -518,10 +527,35 @@ def to_html(text: str) -> str:
 
 
 # ------------------------------------------------------------- الاستدعاء
-def _build_request(messages: list[dict], max_tokens: int) -> tuple[str, dict, dict]:
-    """يبني (المسار، الجسم، الترويسات) حسب واجهة المزوّد."""
-    provider = get_provider()
-    model = _model()
+def _build_request(
+    messages: list[dict],
+    max_tokens: int,
+    *,
+    provider_key: str | None = None,
+    api_key: str | None = None,
+    model: str | None = None,
+) -> tuple[str, dict, dict]:
+    """يبني (المسار، الجسم، الترويسات) حسب واجهة المزوّد.
+
+    `provider_key` / `api_key` / `model` تجاوزٌ صريح للطلب الواحد — أُضيف
+    لمسار قراءة الملفات، حيث كل مستخدم يستخدم **مفتاحه هو** ومزوّده هو،
+    لا المفتاح العام في `.env`. بلا هذا التجاوز كان أي طالب في مجموعة
+    واحدة يقرأ ملفًا بمفتاح المالك.
+    """
+    provider = get_provider(provider_key) if provider_key else get_provider()
+    if model is None:
+        # ⚠️ فرق جوهري: `_model()` تقرأ الموديل **العام** من `.env`، وهو
+        # يخصّ المزوّد العام لا المزوّد المطلوب. تمريره لمزوّد آخر يُنتج
+        # 404 «الموديل غير موجود» ويُقرأ عند المستخدم كأن مفتاحه فاسد.
+        # (مثال حقيقي: `AI_MODEL=gpt-4o` مع اختيار Groq.)
+        # لذلك: مزوّد صريح ⇒ موديله الافتراضي، إلا لو مرّر المستخدم موديله.
+        if provider_key and provider_key.strip().lower() != (
+            settings.ai_provider or ""
+        ).strip().lower():
+            model = provider.default_model
+        else:
+            model = _model()
+    key_value = api_key if api_key is not None else _api_key()
 
     if provider.api_style == "anthropic":
         # Anthropic: النظام بارامتر منفصل، والمخرجات في max_tokens إلزامي
@@ -531,7 +565,7 @@ def _build_request(messages: list[dict], max_tokens: int) -> tuple[str, dict, di
         if system_parts:
             payload["system"] = "\n\n".join(system_parts)
         headers = {
-            "x-api-key": _api_key(),
+            "x-api-key": key_value,
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         }
@@ -541,7 +575,7 @@ def _build_request(messages: list[dict], max_tokens: int) -> tuple[str, dict, di
     payload["max_completion_tokens"] = max_tokens
     payload["temperature"] = settings.ai_temperature
     headers = {
-        "Authorization": f"Bearer {_api_key()}",
+        "Authorization": f"Bearer {key_value}",
         "Content-Type": "application/json",
     }
     return f"{_base_url()}/chat/completions", payload, headers
@@ -589,18 +623,30 @@ async def chat(
     max_tokens: int | None = None,
     timeout: float | None = None,
     retries: int = MAX_RETRIES,
+    provider: str | None = None,
+    api_key: str | None = None,
+    model: str | None = None,
 ) -> str:
     """يرسل محادثة ويعيد نص الرد. يرمي `AIError` فقط.
 
     إعادات المحاولة محصورة في 429/5xx/المهلة — الأخطاء المنطقية
     (400/401/404) لا تنجح بالتكرار فلا نضيّع وقتًا فيها.
+
+    `provider` / `api_key` / `model`: تجاوز للطلب الواحد. مطلوب لمسار
+    قراءة الملفات حيث لكل مستخدم مفتاحه، ولا يصحّ إلزامه بضبط `.env`
+    العام: **الفحص `is_configured()` يُتخطّى حين يُمرَّر مفتاح صريح**،
+    وإلا صار المستخدم يملك مفتاحًا صالحًا ويُرفض لأن المالك لم يضبط مفتاحًا.
     """
-    if not is_configured():
+    explicit = bool(api_key)
+    if not explicit and not is_configured():
         raise AINotConfigured(
             "الذكاء الاصطناعي غير مُعدّ — أضف AI_API_KEY في .env (انظر .env.example)"
         )
 
-    url, payload, headers = _build_request(messages, max_tokens or MAX_OUTPUT_TOKENS)
+    url, payload, headers = _build_request(
+        messages, max_tokens or MAX_OUTPUT_TOKENS,
+        provider_key=provider, api_key=api_key, model=model,
+    )
     deadline = timeout or settings.ai_timeout or REQUEST_TIMEOUT
     last_error = "فشل غير معروف"
 
@@ -636,14 +682,15 @@ async def chat(
             raise AIError(f"طلب مرفوض من المزوّد: {detail}")
 
         if resp.status_code in (401, 403):
-            provider = get_provider()
-            hint = f" (المفتاح من {provider.key_url})" if provider.key_url else ""
+            active = get_provider(provider) if provider else get_provider()
+            hint = f" (المفتاح من {active.key_url})" if active.key_url else ""
             raise AIError(
-                f"المفتاح مرفوض — راجع AI_API_KEY والمزوّد {provider.label}{hint}"
+                f"المفتاح مرفوض — راجع المفتاح ومزوّد {active.label}{hint}"
             )
         if resp.status_code == 404:
+            shown = model or _model()
             raise AIError(
-                f"الموديل «{_model()}» غير موجود عند المزوّد — "
+                f"الموديل «{shown}» غير موجود عند المزوّد — "
                 "افتح لوحة الإدارة → 🤖 الذكاء الاصطناعي → قائمة الموديلات"
             )
         if resp.status_code == 429:
@@ -690,13 +737,23 @@ async def complete(
     system: str | None = None,
     max_tokens: int | None = None,
     timeout: float | None = None,
+    provider: str | None = None,
+    api_key: str | None = None,
+    model: str | None = None,
 ) -> str:
-    """نداء بسيط: تعليمات + مدخل ← نص."""
+    """نداء بسيط: تعليمات + مدخل ← نص.
+
+    الوسائط الثلاثة الأخيرة تُمرَّر إلى `chat` كما هي — بدونها كان أي نداء
+    «فحص» يقيس المزوّد العام في `.env` ولو كان المقصود مزوّد المستخدم.
+    """
     messages: list[dict] = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
-    return await chat(messages, max_tokens=max_tokens, timeout=timeout)
+    return await chat(
+        messages, max_tokens=max_tokens, timeout=timeout,
+        provider=provider, api_key=api_key, model=model,
+    )
 
 
 async def list_models(provider_key: str | None = None) -> list[str]:
@@ -748,14 +805,27 @@ async def list_models(provider_key: str | None = None) -> list[str]:
     return sorted(names)
 
 
-async def healthcheck() -> tuple[bool, str]:
-    """اختبار حقيقي صغير: يكشف خطأ المفتاح أو الموديل قبل أن يراه المستخدم."""
-    if not is_configured():
-        return False, status_text()
+async def healthcheck(
+    *, provider: str | None = None, api_key: str | None = None, model: str | None = None
+) -> tuple[bool, str]:
+    """اختبار حقيقي صغير: يكشف خطأ المفتاح أو الموديل قبل أن يراه المستخدم.
+
+    كان النداء بلا وسائط، فيقيس **المزوّد العام** في `.env` ويُبلّغ عنه —
+    بينما القيمة المعروضة للمستخدم هي مفتاحه هو. فمستخدم يحفظ مفتاحًا
+    سليمًا قد يقرأ «❌ مفتاح غير صالح» لأن المزوّد العام معطوب، والعكس:
+    يقرأ «✅ يعمل» ومفتاحه لا يعمل. الآن يُقاس المزوّد والمفتاح والموديل
+    الذين سيُستخدمون فعلًا.
+    """
+    if not is_configured(provider=provider, api_key=api_key):
+        return False, status_text(provider)
     try:
-        reply = await complete("قل كلمة: جاهز", max_tokens=16, timeout=25.0)
-        provider = get_provider()
-        return True, f"✅ يعمل — {provider.label} · {_model()}\nردّ النموذج: {reply[:60]}"
+        reply = await complete(
+            "قل كلمة: جاهز", max_tokens=16, timeout=25.0,
+            provider=provider, api_key=api_key, model=model,
+        )
+        provider_obj = get_provider(provider)
+        shown_model = model or _model()
+        return True, f"✅ يعمل — {provider_obj.label} · {shown_model}\nردّ النموذج: {reply[:60]}"
     except AIError as exc:
         return False, f"❌ {exc}"
 

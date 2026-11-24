@@ -213,6 +213,32 @@ async def files_by_category(
     return list(await session.scalars(stmt))
 
 
+async def category_counts(
+    session: AsyncSession, subject_id: int, only_approved: bool = True
+) -> dict[int, int]:
+    """عدد الملفات لكل تصنيف في مادة — استعلام تجميعي واحد.
+
+    **العِلّة التي أُصلحت هنا:** الواجهة كانت تنادي `files_by_category` مرة
+    لكل تصنيف ثم تأخذ `len(...)`. وهذه الدالة تُصدر `select(FileItem)` مع
+    `selectinload(category, uploader)` ثم `.limit(50)` — أي:
+        • تحميل صفوف كاملة (مع كيانات مرتبطة) لمجرد عدّها ⇒ N استعلامًا ثقيلًا
+          لكل فتحة لمادة، ويتضاعف مع عدد التصنيفات.
+        • والعدّاد كان **مقطوعًا عند ٥٠**: تصنيف فيه ٨٠ ملفًا يُعرض «(50)».
+    الآن: استعلام واحد بـ `GROUP BY` يرجّع الأعداد الحقيقية بلا سقف.
+    """
+    stmt = (
+        select(FileItem.category_id, func.count(FileItem.id))
+        .where(FileItem.subject_id == subject_id)
+        .group_by(FileItem.category_id)
+    )
+    if only_approved:
+        stmt = stmt.where(FileItem.status == FileStatus.APPROVED.value)
+    else:
+        stmt = stmt.where(FileItem.status != FileStatus.DELETED.value)
+    rows = await session.execute(stmt)
+    return {int(cid): int(count) for cid, count in rows.all() if cid is not None}
+
+
 async def pending_files(session: AsyncSession, limit: int = 30) -> list[FileItem]:
     stmt = (
         select(FileItem)
@@ -533,15 +559,6 @@ async def user_files(
     stmt = stmt.order_by(FileItem.created_at.desc()).limit(limit)
     result = await session.execute(stmt)
     return list(result.scalars().all())
-
-
-async def user_files_count(session: AsyncSession, user_id: int) -> int:
-    stmt = select(func.count(FileItem.id)).where(
-        FileItem.uploader_id == user_id,
-        FileItem.status != FileStatus.DELETED.value,
-    )
-    result = await session.execute(stmt)
-    return int(result.scalar() or 0)
 
 
 async def delete_file(

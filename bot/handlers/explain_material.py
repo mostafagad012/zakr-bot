@@ -18,6 +18,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from aiogram import F, Router
@@ -28,9 +29,9 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from .. import texts
 from ..models import User
 from ..services import files as files_service
-from ..services import material, ocr as ocr_service, pdf, verbatim
+from ..services import material, pdf, verbatim
 from ..states import MaterialExplainFlow
-from .helpers import back_button, escape
+from .helpers import back_button, cb_data, escape
 
 log = logging.getLogger(__name__)
 router = Router(name="explain_material")
@@ -42,10 +43,8 @@ SEND_LIMIT = 3800
 _KEY = "mat"
 
 
-def _cd(value: str) -> str:
-    if len(value.encode()) > MAX_CALLBACK:
-        raise ValueError(f"callback_data طويل: {value}")
-    return value
+# الحارس انتقل إلى `helpers.cb_data` — نسخة واحدة بدل ثلاث.
+_cd = cb_data
 
 
 # ─────────────────────────────────────────────── شاشة البداية
@@ -198,21 +197,26 @@ async def on_pdf(message: Message, db_user: User, db_session,
 
     # استخراج النص: pypdf أولًا، ثم OCR للملفات المصوّرة
     try:
-        extracted = pdf.extract_text(data)
+        # قراءة PDF حاجبة وقد تبلغ ١٢٠ صفحة — في خيط منفصل حتى لا تتجمّد
+        # الحلقة ويتوقف البوت لكل المستخدمين أثناءها.
+        extracted = await asyncio.to_thread(pdf.extract_text, data)
         text = extracted.text or ""
     except Exception as exc:                       # noqa: BLE001
         log.info("فشل استخراج نص PDF: %s", type(exc).__name__)
         text = ""
 
     if len(text.strip()) < material.tutor.MIN_TEXT_CHARS:
-        note = await message.answer("🔎 الملف مصوّر — جارٍ قراءته بـOCR…")
+        # ملف مصوّر: عبر وكيل الرؤية بمفتاح المستخدم — لا OCR محلي
+        note = await message.answer("🔎 الملف مصوّر — جارٍ قراءته بالذكاء الاصطناعي…")
         try:
-            result = await ocr_service.extract_text_from_pdf(data)
-            text = result.text or ""
-        except Exception as exc:                   # noqa: BLE001
-            log.info("تعذّر OCR للشرح: %s", type(exc).__name__)
-            text = ""
-        await _safe_delete(note)
+            from .upload import _read_with_vision
+
+            text = await _read_with_vision(
+                message, db_user, db_session, data,
+                filename=name,
+                mime="application/pdf") or text
+        finally:
+            await _safe_delete(note)
 
     if len(text.strip()) < material.tutor.MIN_TEXT_CHARS:
         await message.answer(

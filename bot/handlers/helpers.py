@@ -38,7 +38,7 @@ class ProgressReporter:
 
     تُحرَّر كل ثوانٍ (لا مع كل صفحة — حدود flood في تيليجرام) فتعرض
     شريط التقدّم والمنقضي والمتبقّي التقديري من `bot/texts.py`.
-    `report()` آمنة الاستدعاء من أي خيط — OCR يعمل في خيط عامل عبر
+    `report()` آمنة الاستدعاء من أي خيط — القراءة تعمل في خيط عامل عبر
     `asyncio.to_thread` ويبثّ عدد الصفحات المنجزة من هناك.
     """
 
@@ -114,6 +114,23 @@ class ProgressReporter:
                 # محذوفة أصلًا أو قديمة — لا شيء يستحق الفشل هنا.
                 log.debug("تعذّر حذف رسالة التقدّم: %s", exc)
             self._msg = None
+
+
+# حدّ تيليجرام لـ`callback_data` — بالبايت لا بالمحارف.
+MAX_CALLBACK = 60
+
+
+def cb_data(value: str) -> str:
+    """حارس `callback_data`: يرفض ما سيرفضه تيليجرام **قبل** الإرسال.
+
+    العربي يستهلك بايتين لكل محرف، فنصّ من ٤٠ حرفًا عربيًا يتجاوز ٦٤ بايت
+    ويُرفض بـ`BUTTON_DATA_INVALID` بعد أن يكون الزر قد رُسم. كان هذا
+    الحارس منسوخًا حرفيًا في ثلاثة ملفات، فأي تعديل على الحدّ يجب أن
+    يُكرَّر ثلاثًا أو يبقى أحدها قديمًا.
+    """
+    if len(value.encode()) > MAX_CALLBACK:
+        raise ValueError(f"callback_data طويل: {value}")
+    return value
 
 
 def escape(text: str | None) -> str:

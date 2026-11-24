@@ -13,7 +13,8 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from .. import texts
 from ..config import settings
 from ..models import FileStatus, User
-from ..services import catalog, files as files_service, ocr as ocr_service, pdf as pdf_service
+from ..services import catalog, extract, files as files_service, pdf as pdf_service
+from ..services import user_ai
 from ..services import settings_service, store
 from ..services.storage import StorageError
 from .helpers import ProgressReporter, back_button, escape, slice_page, status_label
@@ -56,10 +57,6 @@ async def cb_upload_with_subject(callback: CallbackQuery, db_session, state: FSM
     await show_category_choice(callback.message, db_session, state, subject_id)
     await state.set_state("UploadFlow:choosing_category")
     await callback.answer()
-
-
-async def cmd_upload(message: Message, db_session, state: FSMContext) -> None:
-    await start_subject_choice(message, db_session, state, page=0)
 
 
 async def start_subject_choice(target, db_session, state: FSMContext, page: int) -> None:
@@ -244,36 +241,16 @@ async def handle_uploaded_file(message: Message, db_user: User, db_session, stat
         (mime or "").lower() == "application/pdf" or (filename or "").lower().endswith(".pdf")
     )
     if is_pdf:
-        result = pdf_service.extract_text(data)
+        # حاجب — في خيط منفصل (الملفات الكبيرة كانت تجمّد البوت كله)
+        result = await asyncio.to_thread(pdf_service.extract_text, data)
         extracted = result.text or None
         pages = result.pages
 
-        if result.is_scanned and ocr_service.is_available():
-            # عدّاد حي: OCR قد يطول لدقائق، فبدل «جارٍ…» الصامتة نعرض
-            # صفحة/إجمالي + منقضٍ/متبقٍّ. يعمل في خيط حتى لا يتجمد البوت.
-            reporter = ProgressReporter(
-                message, "معالجة الملف المصوّر",
-                total=min(pages, 15) if pages else None,
-                stage="قراءة النص من الصور (OCR)")
-            await reporter.start()
-            try:
-                ocr_result = await asyncio.to_thread(
-                    ocr_service.extract_text_from_pdf,
-                    data, langs=settings.ocr_langs,
-                    dewarp=settings.ocr_dewarp, on_progress=reporter.report)
-            finally:
-                await reporter.finish()
-            if ocr_result.text.strip():
-                extracted = ocr_result.text
-                await message.answer(
-                    "✅ <b>تم استخراج النص بالـ OCR</b>\n"
-                    f"📄 الصفحات المقروءة: {ocr_result.pages_ocr} — البحث داخل الملف سيعمل.",
-                    parse_mode="HTML",
-                )
-            else:
-                await message.answer("⚠️ لم ينجح OCR في قراءة النص — البحث داخل الملف لن يعمل.")
-        elif result.is_scanned:
-            await message.answer("ℹ️ الملف مصوّر و OCR غير مثبّت على السيرفر — البحث داخله لن يعمل.")
+        if result.is_scanned:
+            # ملف مصوّر: لا OCR محلي بعد الآن — يُرسَل إلى وكيل الرؤية
+            # الذي اختاره المستخدم، بمفتاحه هو.
+            extracted = await _read_with_vision(message, db_user, db_session, data,
+                                               filename=filename, mime=mime)
 
     await state.update_data(extracted_text=extracted, pages_count=pages)
     await state.set_state("UploadFlow:waiting_description")
@@ -285,6 +262,84 @@ async def handle_uploaded_file(message: Message, db_user: User, db_session, stat
         parse_mode="HTML",
     )
     return True
+
+
+
+async def _read_with_vision(
+    message: Message, db_user: User, db_session, data: bytes | None,
+    *, filename: str | None = None, mime: str | None = None,
+    on_progress=None,
+) -> str | None:
+    """يقرأ ملفًا مصوّرًا عبر مزوّد المستخدم. لا يرمي — يُبلّغ ويعيد None.
+
+    **لماذا لا نرمي استثناءً؟** لأن قراءة الملف ميزة *مساعدة*: فشلها لا
+    يجوز أن يُسقط الرفع نفسه. الطالب قد يريد رفع المحاضرة للتنزيل فقط،
+    فمن الظلم أن يخسر الرفع لأن مفتاحه انتهى.
+    """
+    if not data:
+        return None
+
+    provider, key, model = await user_ai.vision_choice(db_session, db_user.id)
+    if not key:
+        await message.answer(
+            "ℹ️ <b>الملف مصوّر — لا أستطيع قراءة نصه.</b>\n\n"
+            "قراءة الملفات المصوّرة تتم عبر وكيل ذكاء اصطناعي، وليس عندك "
+            "مفتاح محفوظ.\n"
+            "افتح ⚙️ <b>إعدادات الذكاء الاصطناعي</b> ← أضف مفتاحك، ثم "
+            "أعد رفع الملف — أو ارفعه كما هو وسيبقى متاحًا للتنزيل "
+            "(بلا بحث داخل نصه).",
+            parse_mode="HTML",
+        )
+        return None
+
+    if not extract.supports_vision(provider):
+        await message.answer(f"ℹ️ {extract.vision_reason(provider)}")
+        return None
+
+    reporter = ProgressReporter(
+        message, "قراءة الملف بالذكاء الاصطناعي",
+        total=None, stage=f"الوكيل: {ai_label(provider)}")
+    await reporter.start()
+    try:
+        result = await extract.extract_async(
+            data, filename=filename or "", mime=mime or "",
+            provider_key=provider, api_key=key, model=model or None,
+            on_progress=reporter.report if on_progress is None else on_progress,
+        )
+    except extract.ExtractError as exc:
+        await message.answer(f"⚠️ {escape(str(exc))}", parse_mode="HTML")
+        return None
+    except Exception as exc:               # noqa: BLE001 — لا نُسقط الرفع
+        log.info("تعذّر استخراج النص عبر الرؤية: %s", type(exc).__name__)
+        await message.answer(
+            "⚠️ تعذّر على الوكيل قراءة الملف. الملف مرفوع وسيُتاح للتنزيل، "
+            "لكن البحث داخل نصه لن يعمل."
+        )
+        return None
+    finally:
+        await reporter.finish()
+
+    if result.ok:
+        note = f"✅ <b>قُرئ النص بالذكاء الاصطناعي</b> ({ai_label(provider)})"
+        if result.pages > 1:
+            note += f"\n📄 الصفحات: {result.pages_done} من {result.pages}"
+        if result.notes:
+            note += "\n" + "\n".join(f"• {escape(n)}" for n in result.notes)
+        note += "\n🔎 البحث داخل الملف سيعمل."
+        await message.answer(note, parse_mode="HTML")
+        return result.text
+
+    await message.answer(
+        "⚠️ لم أستخرج نصًا من الملف — قد تكون صفحاته فارغة أو الصور غير واضحة."
+    )
+    return None
+
+
+def ai_label(provider: str) -> str:
+    from ..services import ai
+
+    found = ai.PROVIDERS.get((provider or "").lower())
+    return found.label if found else (provider or "غير محدّد")
 
 
 # --------------------------------------------------------------- الوصف والوسوم

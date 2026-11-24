@@ -8,14 +8,14 @@
 #      bash setup.sh --start       # يثبّت ثم يشغّل البوت فورًا
 #      bash setup.sh --docker      # يبني ويشغّل عبر دوكر
 #      bash setup.sh --systemd     # يثبّت خدمة systemd (٢٤ ساعة)
-#      bash setup.sh --ocr-only    # يثبّت حزم OCR فقط
+#      bash setup.sh --ocr-only    # توافق خلفي: لم يعد هناك ما يُثبَّت للـOCR
 #      bash setup.sh --check       # يفحص البيئة بلا تثبيت
 #      bash setup.sh --test        # يثبّت ثم يشغّل الاختبارات
 #      bash setup.sh --wispbyte    # وضع لوحة استضافة (Wispbyte/Pterodactyl): كل شيء
 #                                  #   آليًا ثم يشغّل البوت. استخدمه كـStartup Command.
 #
 #  على Wispbyte / Pterodactyl / أي لوحة:
-#      Startup Command =  bash setup.sh --wispbyte  ← المسار الكامل
+#      Startup Command =  python main.py        ← الموصى به (لا يفترض bash)
 #      وأضف في تبويب Startup ← Variables:
 #          BOT_TOKEN  ·  OWNER_ID  ·  STORAGE_CHANNEL
 #      (لا حاجة لتعديل .env — متغيّرات اللوحة تفوز عليه)
@@ -29,7 +29,7 @@
 #
 #  ما يفعله بالترتيب:
 #    1) يتحقق من بايثون (3.11+) ومن أدوات النظام
-#    2) يثبّت حزم OCR (tesseract + العربية + poppler + خط عربي) إن أمكن
+#    2) يثبّت حزم بايثون (OCR أُزيل: القراءة عبر وكيل المستخدم)
 #    3) ينشئ بيئة افتراضية .venv ويثبّت requirements
 #    4) ينشئ .env من .env.example ويسألك عن الأسطر الثلاثة الإلزامية
 #    5) يبني قاعدة البيانات ويشغّل فحصًا ذاتيًا (بلا شبكة)
@@ -59,12 +59,11 @@ ENV_EXAMPLE=".env.example"
 PY_MIN_MINOR=11            # 3.11+
 SERVICE_NAME="zakr-bot"
 DOCKER_IMAGE="zakr-bot"
-OCR_PACKAGES=(tesseract-ocr tesseract-ocr-ara poppler-utils fonts-hosny-amiri)
 
 # --------------------------------------------------------------- البيئة
 # Termux (أندرويد) ليس دبيانًا ولا ماك: مدير الحزم `pkg`، وأسماء الحزم
-# مختلفة (لا وجود لـ tesseract-ocr-ara)، و`onnxruntime` بلا حزمة أندرويد
-# أصلًا، وبايثون داخل venv لا يرى حزم `pkg` إلا بـ --system-site-packages.
+# مختلفة الأسماء عن دبيان، وبايثون داخل venv لا يرى حزم `pkg` إلا
+# بـ --system-site-packages.
 # لذلك نفصل المسار بدلًا من محاولة «إنقاذ» أوامر Debian على أندرويد —
 # تفشل بصمت وتُربك المستخدم.
 # Wispbyte / Pterodactyl: ملفات المشروع في /home/container، ولا صلاحية
@@ -79,7 +78,6 @@ if [[ -n "${TERMUX_VERSION:-}" ]] || [[ "${PREFIX:-}" == *com.termux* ]]; then
   IS_TERMUX=1
 fi
 
-OCR_PACKAGES_TERMUX=(tesseract poppler python-pillow python-numpy)
 # حاجيات لا تُبنى على أندرويد (لا عجلات aarch64 على PyPI): تُؤخذ من `pkg`.
 # (ملاحظة: القائمة الفعلية للتخطّي تُبنى داخل termux_requirements — لا تكرار)
 
@@ -216,293 +214,17 @@ step_python() {
   fi
 }
 
-# ------------------------------------------------ 2) حزم النظام (OCR)
-# =============================================================================
-#  التحقق **الفعلي** من OCR — لا يكفي أن الأمر موجود، لازم يشتغل فعلًا
-# =============================================================================
-#  عِلّة حقيقية وقعت: المستخدم ثبّت tesseract و poppler، والسكربت يقول
-#  «غير مثبّتين» أو البوت يقول «OCR غير متاح». و`shutil.which`/`have` لا
-#  تكشف الأسباب الحقيقية:
-#    • tesseract موجود لكن مكتبة مشتركة ناقصة/معطوبة → يظهر في PATH ويفشل
-#      عند التشغيل (رسالة ld.so) — inutile تمامًا لو اكتفينا بـwhich.
-#    • pdftoppm موجود لكنه لا يقدر يقرأ PDF (صلاحيات/مكتبة) → نفس المشكلة.
-#    • بيانات اللغة العربية (`ara.traineddata`) غير موجودة → OCR «يعمل»
-#      لكنه يفشل على كل صفحة عربية ويرجع نصًا فارغًا بهدوء.
-#  لذلك: نُشغّل الأدوات فعليًا ونقرأ مخرجاتها.
-OCR_PROBE_PDF=""
-
-ocr_probe_prepare() {   # ينشئ PDF صفحة واحدة لاختبار حقيقي
-  [[ -n "$OCR_PROBE_PDF" && -f "$OCR_PROBE_PDF" ]] && return 0
-  local d tmp
-  d="$(mktemp -d 2>/dev/null)" || return 1
-  # PDF يدوي صغير بصفحة واحدة (بلا مكتبات) — كافٍ لاختبار pdftoppm/tesseract
-  python3 - "$d/probe.pdf" <<'PYEOF' 2>/dev/null || return 1
-import sys, zlib
-objs = [
-    b"<< /Type /Catalog /Pages 2 0 R >>",
-    b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-    b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
-]
-stream = b"BT /F1 24 Tf 20 40 Td (OCR PROBE 12345) Tj ET"
-objs.append(b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream")
-objs.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
-out = bytearray(b"%PDF-1.4\n")
-offs = []
-for i, o in enumerate(objs, 1):
-    offs.append(len(out))
-    out += b"%d 0 obj\n" % i + o + b"\nendobj\n"
-xref = len(out)
-out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
-for off in offs:
-    out += b"%010d 00000 n \n" % off
-out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, xref)
-open(sys.argv[1], "wb").write(out)
-PYEOF
-  [[ -f "$d/probe.pdf" ]] || return 1
-  OCR_PROBE_PDF="$d/probe.pdf"
-  export OCR_PROBE_DIR="$d"
-}
-
-# يرجع: 0 = يعمل فعلًا، 1 = غير مثبّت، 2 = مثبّت لكن معطوب، 3 = بلا عربية
-ocr_verify() {
-  # ١) tesseract: موجود في PATH؟
-  if ! have tesseract; then
-    info "tesseract غير مثبّت"
-    return 1
-  fi
-  # ٢) tesseract: يعمل فعلًا؟ (mكتبة ناقصة/ld.so → يفشل هنا)
-  local tv
-  # ⚠️ لا تستخدم `if ! cmd="$(… | head)"` — `head` يُنهي الأنبوب بنجاح فيُخفي
-  #    فشل tesseract. نلتقط كود الخروج من tesseract نفسه.
-  #    (PIPESTATUS لا يعبر حدود $( ) — لذلك لا نستخدم أنبوبًا هنا أبدًا)
-  local trc
-  tv="$(tesseract --version 2>&1)"; trc=$?
-  tv="$(printf '%s\n' "$tv" | head -2)"
-  if (( trc != 0 )) || [[ -z "$tv" ]]; then
-    warn "tesseract موجود في PATH لكنه لا يعمل"
-    if [[ -n "$tv" ]]; then
-      info "السبب:"; printf '%s\n' "$tv" | while IFS= read -r l; do [[ -n "$l" ]] && info "  $l"; done
-    else
-      info "السبب: الملف موجود لكنه لا ينفّذ (تلف/صلاحية/مكتبة ناقصة)"
-    fi
-    return 2
-  fi
-  tv="${tv%%$'\n'*}"
-  info "tesseract يعمل: $tv"
-
-  # ٣) pdftoppm: موجود ويعمل فعلًا؟ (نختبره على PDF حقيقي)
-  if ! have pdftoppm; then
-    info "pdftoppm غير مثبّت (تحتاجه الملفات المصوّرة PDF)"
-    return 1
-  fi
-  if ocr_probe_prepare; then
-    local out_img="$OCR_PROBE_DIR/probe"
-    if pdftoppm -r 100 -png -f 1 -l 1 "$OCR_PROBE_PDF" "$out_img" >/dev/null 2>&1 \
-       && ls "$out_img"*.png >/dev/null 2>&1; then
-      ok "pdftoppm يعمل فعلًا (حوّل PDF إلى صورة)"
-    else
-      warn "pdftoppm موجود لكنه فشل في تحويل PDF فعلي"
-      local perr; perr="$(pdftoppm -r 100 -png -f 1 -l 1 "$OCR_PROBE_PDF" "$out_img" 2>&1 | head -3)"
-      printf '%s\n' "$perr" | while IFS= read -r l; do [[ -n "$l" ]] && info "  $l"; done
-      return 2
-    fi
-  else
-    info "تعذّر تجهيز PDF اختباري — أتخطّى الاختبار الفعلي لـpdftoppm"
-  fi
-
-  # ٤) اللغة العربية: موجودة فعلًا؟ ونقرأ بها فعلًا؟
-  local langs; langs="$(tesseract --list-langs 2>/dev/null | tr '\n' ' ' || true)"
-  if [[ "$langs" != *ara* ]]; then
-    warn "بيانات اللغة العربية (ara.traineddata) غير موجودة"
-    info "OCR الإنجليزي يعمل، لكن كل صفحة عربية سترجع نصًا فارغًا بهدوء."
-    return 3
-  fi
-  ok "بيانات العربية موجودة (ara)"
-
-  # ٥) أهم اختبار: هل tesseract يقرأ صورة فعلية فعلًا؟
-  local img=""
-  img="$(find "$OCR_PROBE_DIR" -maxdepth 1 -name 'probe*.png' -print -quit 2>/dev/null || true)"
-  if [[ -n "$img" && -f "$img" ]]; then
-      local read_out; read_out="$(tesseract "$img" stdout 2>/dev/null | tr -d '[:space:]' || true)"
-      if [[ -n "$read_out" ]]; then
-        ok "tesseract قرأ صورة فعلية بنجاح"
-      else
-        warn "tesseract لم يقرأ أي نص من صورة اختبارية واضحة"
-        info "غالبًا بيانات اللغة (tessdata) ناقصة أو TESSDATA_PREFIX خاطئ."
-        return 2
-      fi
-  fi
-  return 0
-}
-
-ocr_probe_cleanup() {
-  [[ -n "${OCR_PROBE_DIR:-}" && -d "${OCR_PROBE_DIR:-}" ]] && rm -rf "$OCR_PROBE_DIR"
-  OCR_PROBE_PDF=""
-}
-
-# =============================================================================
-#  2) تثبيت قارئ الملفات المصوّرة — بأسماء **كل منصّة** الصحيحة
-# =============================================================================
+# ───────────────────────────────────── قسم OCR — أُزيل بالكامل
+#  قراءة الملفات المصوّرة لم تعد تحتاج tesseract/poppler: تتم عبر وكيل
+#  الرؤية الذي يختاره المستخدم بمفتاحه (انظر bot/services/extract.py).
+#  لا حزم نظام تُثبَّت، ولا بيانات لغة تُنزَّل، ولا فحص يشغّل tesseract.
 step_ocr() {
-  head_ "2/6 قارئ الملفات المصوّرة (اختياري)"
-
-  local rc=0
-  ocr_verify || rc=$?
-
-  if (( rc == 0 )); then
-    ok "tesseract + poppler + العربية: كلها تعمل فعلًا"
-    ocr_probe_cleanup
-    return 0
-  fi
-
-  # ── التثبيت: لكل منصّة أسماؤها الحقيقية (لا أوامر ديبيان على أندرويد)
-  if (( IS_TERMUX )); then
-    info "أندرويد/Termux — أسماء الحزم مختلفة عن ديبيان:"
-    info "  المطلوب: ${OCR_PACKAGES_TERMUX[*]}  (ولا وجود لـtesseract-ocr-ara)"
-    if pkg install -y "${OCR_PACKAGES_TERMUX[@]}" >/dev/null 2>&1; then
-      ok "ثُبّتت tesseract و poppler من pkg"
-    else
-      warn "تعذّر التثبيت التلقائي — نفّذ يدويًا:"
-      info "  pkg install ${OCR_PACKAGES_TERMUX[*]}"
-    fi
-  elif have apt-get; then
-    if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
-      info "تثبيت حزم OCR (كجذر)…"
-      if apt-get update -qq \
-        && apt-get install -y --no-install-recommends "${OCR_PACKAGES[@]}"; then
-        ok "ثُبّتت حزم OCR"
-      else
-        warn "تعذّر التثبيت"
-      fi
-    elif have sudo && sudo -n true 2>/dev/null; then
-      info "تثبيت حزم OCR (بـ sudo)…"
-      if sudo apt-get update -qq \
-        && sudo apt-get install -y --no-install-recommends "${OCR_PACKAGES[@]}"; then
-        ok "ثُبّتت حزم OCR"
-      else
-        warn "تعذّر التثبيت"
-      fi
-    else
-      info "تحتاج صلاحية التثبيت. نفّذ يدويًا:"
-      info "  sudo apt-get install -y ${OCR_PACKAGES[*]}"
-    fi
-  elif have brew; then
-    info "ماك: brew install tesseract tesseract-lang poppler"
-    brew install tesseract tesseract-lang poppler >/dev/null 2>&1 || warn "تعذّر brew"
-  else
-    info "ويندوز/غير معروف: ثبّت tesseract (مع Arabic) + poppler يدويًا وأضفهم لـPATH"
-  fi
-
-  # ── بيانات العربية: ننزّلها إن كانت ناقصة (على كل المنصّات، لا أندرويد فقط)
-  ocr_fetch_arabic_data || true
-
-  # ── إعادة التحقق الفعلي بعد التثبيت
-  ocr_probe_cleanup
-  local rc2=0
-  ocr_verify || rc2=$?
-  ocr_probe_cleanup
-
-  if (( rc2 == 0 )); then
-    ok "قارئ الملفات المصوّرة جاهز ومُختبَر"
-  else
-    warn "قارئ الملفات المصوّرة غير جاهز — البوت يعمل، لكن السكانر لن يُقرأ"
-    ocr_troubleshoot
-  fi
+  head_ "قراءة الملفات المصوّرة"
+  info "لا شيء يُثبَّت: القراءة تتم عبر وكيل الذكاء الاصطناعي بمفتاح كل مستخدم."
+  info "المطلوب: pip install -r requirements.txt (PyMuPDF داخل القائمة)."
   return 0
 }
 
-# ينزّل ara.traineddata في المكان الصحيح لكل منصّة (بلا إذن كتابة → يرشد)
-ocr_fetch_arabic_data() {
-  local tessdata
-  if (( IS_TERMUX )); then
-    tessdata="${PREFIX:-/data/data/com.termux/files/usr}/share/tessdata"
-  else
-    # نستنتج المكان من tesseract نفسه لا بالتخمين.
-    # (tesseract 4/5 لا يملك --print-tessdata-dir — لا تعتمد عليه)
-    tessdata=""
-    local tsl; tsl="$(tesseract --list-langs 2>/dev/null | head -1 || true)"
-    if [[ "$tsl" == *tessdata*/* || "$tsl" == *tessdata* ]]; then
-      # مثل: «List of available languages in /usr/share/tesseract-ocr/5/tessdata/ (2):»
-      tessdata="$(printf '%s' "$tsl" | sed -n 's|.*\(/.*tessdata\)/\?.*|\1|p')"
-    fi
-    if [[ -z "$tessdata" || ! -d "$tessdata" ]]; then
-      tessdata=""
-      for d in /usr/share/tesseract-ocr/5/tessdata /usr/share/tesseract-ocr/4.00/tessdata \
-               /usr/share/tessdata /usr/local/share/tessdata \
-               /opt/homebrew/share/tessdata "${HOME}/.local/share/tessdata"; do
-        [[ -d "$d" ]] && { tessdata="$d"; break; }
-      done
-    fi
-    # احتياط أخير: أي مكان فيه eng.traineddata
-    if [[ -z "$tessdata" ]]; then
-      local found
-      found="$(find /usr/share /usr/local/share -name "eng.traineddata" 2>/dev/null | head -1 || true)"
-      [[ -n "$found" ]] && tessdata="$(dirname "$found")"
-    fi
-  fi
-  [[ -n "$tessdata" ]] || { warn "تعذّر تحديد مجلد tessdata"; return 1; }
-
-  if [[ -d "$tessdata" && -f "$tessdata/ara.traineddata" ]]; then
-    ok "بيانات العربية موجودة في $tessdata"
-    return 0
-  fi
-
-  info "تنزيل بيانات اللغة العربية (ara) ≈ ١.٥ ميجا …"
-  local url="https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/ara.traineddata"
-  local tmpf; tmpf="$(mktemp 2>/dev/null || echo "./.ara.download")"
-  if curl -fsSL --retry 3 -o "$tmpf" "$url" 2>/dev/null; then
-    if cp "$tmpf" "$tessdata/ara.traineddata" 2>/dev/null; then
-      ok "بيانات العربية جاهزة في $tessdata"
-      rm -f "$tmpf"; return 0
-    fi
-    warn "نزّلت الملف لكن لا أملك صلاحية الكتابة في $tessdata"
-    info "نفّذ: sudo cp $tmpf $tessdata/ara.traineddata"
-    return 1
-  fi
-  warn "تعذّر تنزيل بيانات العربية (شبكة؟)"
-  info "  يدويًا: curl -L -o \$TESSDATA/ara.traineddata $url"
-  rm -f "$tmpf" 2>/dev/null
-  return 1
-}
-
-# رسالة تشخيص دقيقة عند بقاء المشكلة — تقول **السبب** لا «فشل»
-ocr_troubleshoot() {
-  local t="", p=""
-  have tesseract && t="موجود" || t="غير مثبّت"
-  have pdftoppm && p="موجود" || p="غير مثبّت"
-  info "التشخيص: tesseract=$t · pdftoppm=$p"
-  if ! have tesseract && ! have pdftoppm; then
-    if (( IS_TERMUX )); then
-      info "  نفّذ: pkg install ${OCR_PACKAGES_TERMUX[*]}"
-    else
-      info "  نفّذ: sudo apt-get install -y ${OCR_PACKAGES[*]}"
-    fi
-  elif have tesseract; then
-    info "  جرّب الأمرين لرؤية السبب بنفسك:"
-    info "    tesseract --version"
-    info "    tesseract --list-langs | grep ara"
-  fi
-  info "تأكد أن مجلد tessdata فيه ara.traineddata، أو عيّن TESSDATA_PREFIX."
-}
-
-# ------------------------------------------------ 3) البيئة الافتراضية والحاجيات
-# =============================================================================
-#  إعداد مسار البيئة الافتراضية (مسار آمن للتخزين المشترك على أندرويد)
-# =============================================================================
-#  عِلّة حقيقية يقع فيها كل من ينزّل المشروع على الهاتف:
-#
-#    تخزين أندرويد المشترك (~/storage/... = /sdcard = /storage/emulated/0)
-#    **لا يدعم الروابط الرمزية ولا صلاحية التنفيذ**. و`python -m venv` يعتمد
-#    على الاثنين: ينشئ bin/python كرابط رمزي لبايثون النظام، ويجعل الملفات
-#    قابلة للتنفيذ. فيفشل الإنشاء دائمًا برسالة مثل:
-#        Unable to symlink ... PermissionError: [Errno 13]
-#
-#  الحل الصحيح (وليس التخطّي): نضع البيئة **في مجلد Termux الخاص**
-#  (~/.local/share/zakr-bot/venv) حيث POSIX كامل، ونترك في مجلد المشروع
-#  ملفًا صغيرًا باسم .venv/bin/python يوجّه إلى بيئة المستخدم. فتبقى كل
-#  أوامر التوثيق تعمل كما هي (source .venv/bin/activate).
-#
-#  وميزة إضافية مهمة: حذف مجلد المشروع أو استبداله لا يفقد البيئة.
 setup_venv_location() {
   local want_local=0
 
@@ -723,10 +445,6 @@ step_venv_install() {
       ok "الحاجيات مثبّتة ومتحقَّقة بالاستيراد"
       return 0
     fi
-    if [[ -n "${WISPBYTE:-}" || -d /home/container ]]; then
-      die "فشل تثبيت مجموعة Wispbyte الكاملة — راجع سبب الفشل أعلاه.
-   التشخيص: $VENV_PY self_install.py --check"
-    fi
     die "فشل تثبيت الحاجيات — السبب مذكور أعلاه باسم الحزمة.
    لعرض التفاصيل كاملة: $VENV_PY -m pip install -r requirements.txt"
   fi
@@ -882,8 +600,6 @@ termux_requirements() {
     local meta; meta="$(termux_pkg_only "$spec_mod")" || continue
     need_pkg+=("${meta%%|*}")
   done
-  # python-numpy: عجلة TUR موجودة، لكن حزمة pkg أسرع وأخفّ — نجرّبها أولًا
-  need_pkg+=(python-numpy)
 
   info "تثبيت حزم أندرويد الأصلية من pkg …"
   # لا نحكم بالتوفّر من `pkg show` وحده (يفشل لأسباب فهرسة/شبكة)، ونجرّب
@@ -896,7 +612,6 @@ termux_requirements() {
   ((${#pkg_bad[@]})) && warn "لم تُثبَّت من pkg: ${pkg_bad[*]}"
 
   # ── ٣) بناء قائمة pip: كل سطر في requirements.txt إما إقلاع أو اختياري
-  #     الاختياري (pytesseract/pdf2image) يُعالَج في المرحلة ٥ منفردًا.
 
   while IFS= read -r line; do
     case "$line" in ""|"#"*) continue ;; esac
@@ -909,7 +624,7 @@ termux_requirements() {
         # نُثبّتها من pkg؛ نتحقّق فعلًا أنها تعمل قبل تخطّيها
         if "$py" -c "import PIL" >/dev/null 2>&1; then skip_pip+=("pillow"); continue
         else warn "Pillow غير متاحة — سأحاولها من pip كعجلة"; fi ;;
-      greenlet|numpy)
+      greenlet)
         if "$py" -c "import $name" >/dev/null 2>&1; then skip_pip+=("$name"); continue; fi ;;
       python-bidi)
         # ❗الحزمة التي أسقطت التثبيت: Rust/maturin، لا عجلة أندرويد، ولا
@@ -946,22 +661,12 @@ termux_requirements() {
     ok "ثُبّتت حاجيات الإقلاع كعجلات جاهزة"
   fi
 
-  # ── ٥) الاختياري: لا يُسقِط التثبيت. نجرّبه واحدًا واحدًا ونتجاهل الفشل.
-  local opt
-  for opt in pytesseract pdf2image; do
-    "$py" -c "import $opt" >/dev/null 2>&1 && continue
-    if "$py" -m pip install --quiet --no-input --no-cache-dir --only-binary=:all: "$opt" >>"$pip_log" 2>&1; then
-      :
-    else
-      unavailable+=("$opt — ميزة ناقصة، ليست ضرورية للإقلاع")
-    fi
-  done
-  "$py" -c "import numpy" >/dev/null 2>&1 || unavailable+=("numpy")
+  # ── ٥) لا حزم اختيارية بعد الآن: أُزيلت حزم OCR (~120MB) مع المسار نفسه.
 
   # ── ٦) تحقّق فعلي بالاستيراد: «نجح التثبيت» ≠ «يعمل»
   local required_imports=(aiogram:aiogram sqlalchemy:SQLAlchemy aiosqlite:aiosqlite
                           pypdf:pypdf httpx:httpx alembic:alembic openpyxl:openpyxl
-                          numpy:numpy greenlet:greenlet)
+                          pymupdf:PyMuPDF greenlet:greenlet)
   local missing=() mod
   for line in "${required_imports[@]}"; do
     mod="${line%%:*}"
@@ -990,7 +695,7 @@ termux_requirements() {
       warn "ما زالت ناقصة: ${still[*]}"
       info "البوت لن يبدأ بدونها. لمعرفة السبب الكامل:"
       info "  $py -m pip install ${still[*]}"
-      info "أندرويد: تأكد من الحزم الأصلية: pkg install python-pillow python-greenlet python-numpy"
+      info "أندرويد: تأكد من الحزم الأصلية: pkg install python-pillow python-greenlet"
       local why2; why2="$(grep -iE "error|not supported|no matching" "$pip_log" | tail -3)"
       [[ -n "$why2" ]] && { info "سبب pip:"; printf '%s\n' "$why2" | while IFS= read -r l; do info "  $l"; done; }
       return 1
@@ -1009,45 +714,22 @@ termux_requirements() {
 }
 
 # ------------------------------------------------ 4) ملف .env
-valid_token() { [[ "$1" =~ ^[0-9]{5,}:[A-Za-z0-9_-]{20,}$ ]] && [[ "$1" != *AAExample* ]] && [[ "$1" != *ReplaceMe* ]]; }
+valid_token() { [[ "$1" == *":"* ]] && [[ ${#1} -ge 20 ]]; }
 valid_id()    { [[ "$1" =~ ^[0-9]+$ ]] && [[ "$1" != "0" ]]; }
 valid_channel() { [[ "$1" =~ ^-100[0-9]+$ ]] || [[ "$1" =~ ^@[A-Za-z0-9_]{4,}$ ]]; }
 
 step_env() {
   head_ "4/6 ملف الإعدادات .env"
   if [[ -f "$ENV_FILE" ]]; then
-    ok "$ENV_FILE موجود — سأحافظ على إعداداته الحالية"
-    # لا نتجاوز الملف الموجود: نطلب فقط القيم الإلزامية الناقصة/المثالّية.
-    local missing=() key value token owner channel bad=0
+    ok "$ENV_FILE موجود — لن ألمسه (مفاتيحك آمنة)"
+    # نتحقق فقط من وجود الأسطر الإلزامية
+    local missing=()
     for key in BOT_TOKEN OWNER_ID STORAGE_CHANNEL; do
-      value="${!key:-$(grep -m1 -E "^${key}=" "$ENV_FILE" | cut -d= -f2- || true)}"
-      [[ -n "$value" ]] || missing+=("$key")
-      [[ "$key:$value" == BOT_TOKEN:*AAExample* || "$key:$value" == BOT_TOKEN:*ReplaceMe* || "$key:$value" == OWNER_ID:123456789 || "$key:$value" == STORAGE_CHANNEL:-1001234567890 ]] && missing+=("$key")
+      grep -qE "^${key}=.+$" "$ENV_FILE" || missing+=("$key")
     done
-    if [[ "${NO_INPUT:-0}" != "1" && ( -t 0 || "${ZAKR_INTERACTIVE_SETUP:-0}" == "1" ) && ${#missing[@]} -gt 0 ]]; then
-      printf '\nإعدادات ناقصة في .env — أدخل المطلوب فقط (Enter للتخطي):\n'
-      token="${BOT_TOKEN:-$(grep -m1 '^BOT_TOKEN=' "$ENV_FILE" | cut -d= -f2- || true)}"
-      owner="${OWNER_ID:-$(grep -m1 '^OWNER_ID=' "$ENV_FILE" | cut -d= -f2- || true)}"
-      channel="${STORAGE_CHANNEL:-$(grep -m1 '^STORAGE_CHANNEL=' "$ENV_FILE" | cut -d= -f2- || true)}"
-      if [[ -z "$token" || "$token" == *AAExample* || "$token" == *ReplaceMe* ]]; then
-        read -r -s -p 'توكن البوت من @BotFather: ' token || true; printf '\n'
-        token="${token//[$'\\n\\r\\t ']/}"
-        [[ -z "$token" ]] || { valid_token "$token" && _set_env BOT_TOKEN "$token" || { warn 'صيغة BOT_TOKEN غير صحيحة'; bad=1; }; }
-      fi
-      if [[ -z "$owner" || "$owner" == '123456789' ]]; then
-        read -r -p 'رقمك في تيليجرام (OWNER_ID): ' owner || true
-        owner="${owner//[$'\\n\\r\\t ']/}"
-        [[ -z "$owner" ]] || { valid_id "$owner" && _set_env OWNER_ID "$owner" || { warn 'OWNER_ID يجب أن يكون أرقامًا فقط'; bad=1; }; }
-      fi
-      if [[ -z "$channel" || "$channel" == '-1001234567890' ]]; then
-        read -r -p 'آيدي قناة التخزين (STORAGE_CHANNEL): ' channel || true
-        channel="${channel//[$'\\n\\r\\t ']/}"
-        [[ -z "$channel" ]] || { valid_channel "$channel" && _set_env STORAGE_CHANNEL "$channel" || { warn 'صيغة STORAGE_CHANNEL غير صحيحة'; bad=1; }; }
-      fi
-      ((bad == 0)) && ok 'تم تحديث .env مع الحفاظ على بقية الإعدادات'
-    elif ((${#missing[@]})); then
-      warn "إعدادات ناقصة في $ENV_FILE: ${missing[*]}"
-      info 'شغّل setup من طرفية تفاعلية لإدخالها، أو أضفها إلى Variables في لوحة الاستضافة.'
+    if ((${#missing[@]})); then
+      warn "هذه الأسطر ناقصة أو فاضية في $ENV_FILE: ${missing[*]}"
+      info "املأها يدويًا ثم أعد التشغيل — البوت لن يعمل بدونها."
     fi
     return 0
   fi
@@ -1130,7 +812,6 @@ _set_env() {  # _set_env KEY VALUE — يستبدل السطر أو يضيفه،
   fi
   mv "$tmp" "$ENV_FILE"
   chmod 600 "$ENV_FILE" 2>/dev/null || true
-  export "$key=$value"
 }
 
 # ------------------------------------------------ 5) فحص ذاتي (بلا شبكة)
@@ -1212,17 +893,16 @@ try:
 except Exception as exc:                       # noqa: BLE001
     problems.append(f"فحص حفظ الرموز فشل: {type(exc).__name__}")
 
-# على أندرويد: نتأكد أن الحزم القابلة للتثبيت فعلًا مستوردة، وأن الناقص
-# المعروف (onnxruntime) غير مطلوب عند الإقلاع — لا نُفشل التثبيت بسببه.
+# numpy كان يُفحص هنا لأجل OCR. أُزيل مع المسار: لا شيء في الكود يستوردها.
 missing_optional = []
-for name, label in (("numpy", "numpy"), ("PIL", "Pillow")):
+for name, label in (("PIL", "Pillow"),):
     try:
         __import__(name)
     except Exception:
         missing_optional.append(label)
 if missing_optional:
     problems.append("حزم ناقصة: " + "، ".join(missing_optional)
-                    + " — جرّب: pkg install python-numpy python-pillow")
+                    + " — جرّب: pkg install python-pillow")
 
 print("MODE:", settings.ai_provider, "| AI:", "مفتاح موجود" if settings.ai_provider_keys or settings.ai_api_key else "بلا مفتاح (طبيعي)")
 if problems:
@@ -1246,7 +926,7 @@ PY
 run_local() {
   head_ "تشغيل البوت"
   info "Ctrl+C للإيقاف"
-  ZAKR_SETUP_COMPLETE=1 PYTHONUNBUFFERED=1 exec "$VENV_PY" -u "$SCRIPT_DIR/main.py"
+  exec "$VENV_PY" -u main.py
 }
 
 run_tests() {
@@ -1291,7 +971,7 @@ After=network-online.target
 Type=simple
 User=${run_user}
 WorkingDirectory=${SCRIPT_DIR}
-ExecStart=${SCRIPT_DIR}/${VENV_DIR}/bin/python -u -m bot.main
+ExecStart=${SCRIPT_DIR}/${VENV_DIR}/bin/python ${SCRIPT_DIR}/main.py
 Restart=always
 RestartSec=5
 
@@ -1324,8 +1004,8 @@ run_check() {
   fi
   local py
   if py="$(python_ok)"; then ok "بايثون: $("$py" --version 2>&1)"; else warn "بايثون 3.$PY_MIN_MINOR+ غير موجود"; fi
-  if have tesseract; then ok "tesseract: $(tesseract --version 2>&1 | head -1)"; else warn "tesseract غير مثبّت"; fi
-  if have pdftoppm; then ok "poppler (pdftoppm) موجود"; else warn "poppler غير مثبّت"; fi
+  # لا نفحص tesseract/poppler: لم يبقَ لهما دور. القراءة عبر وكيل الرؤية.
+  ok "قراءة الملفات المصوّرة: عبر وكيل الذكاء الاصطناعي بمفتاح المستخدم"
   if [[ -d "$VENV_DIR" ]]; then
     if venv_is_valid; then
       ok "البيئة الافتراضية سليمة ($VENV_DIR)"
@@ -1345,14 +1025,7 @@ run_check() {
     warn "$ENV_FILE غير موجود"
   fi
   if (( IS_TERMUX )); then
-    if ls "${PREFIX:-/data/data/com.termux/files/usr}"/share/tessdata/ara* >/dev/null 2>&1; then
-      ok "بيانات اللغة العربية (ara) موجودة"
-    else
-      warn "بيانات ara ناقصة — سينزّلها السكربت، أو: "
-      info "  curl -L -o \$PREFIX/share/tessdata/ara.traineddata \\"
-      info "    https://github.com/tesseract-ocr/tessdata_fast/raw/main/ara.traineddata"
-    fi
-    info "فكّ التواء الصور (onnxruntime) غير متاح على أندرويد — طبيعي"
+    info "قراءة الصور على أندرويد: عبر وكيل الرؤية — لا حزم نظام مطلوبة"
   else
     if have docker; then ok "docker: $(docker --version 2>&1 | head -1)"; else info "docker غير مثبّت (اختياري)"; fi
   fi
@@ -1367,31 +1040,6 @@ usage() {
 # تحقق **مبكر** من متغيّرات اللوحة قبل أي عمل — لا نُنشئ .env ثم نكتشف
 # أن القيم ناقصة. على Wispbyte لا توجد طرفية، فالرسالة يجب أن تكون واضحة
 # ومكتفية بذاتها في سجل اللوحة.
-# تنزيل tesseract محليًا على لوحات الاستضافة (بلا root وبلا apt install).
-# `apt-get download` لا يحتاج صلاحية root — ننزّل الـ.deb ونفكّه في .ocr/
-# ثم نشغّله بـ LD_LIBRARY_PATH. البوت يكتشفه تلقائيًا (bot/services/ocr.py).
-panel_ocr_fetch() {
-  [[ "${ZAKR_SKIP_OCR:-0}" == "1" ]] && { info "تخطّي OCR (ZAKR_SKIP_OCR=1)"; return 0; }
-
-  # يعمل أصلًا؟ (سيسأل البوت نفسه لا نخمّن)
-  if "$VENV_PY" -c "import sys; sys.path.insert(0,'.'); from bot.services import ocr; sys.exit(0 if ocr.is_available() else 1)" 2>/dev/null; then
-    ok "قارئ الملفات المصوّرة يعمل"
-    return 0
-  fi
-
-  [[ -f "$SCRIPT_DIR/ocr_fetch.py" ]] || { info "ocr_fetch.py غير موجود"; return 0; }
-
-  info "تنزيل tesseract محليًا (بلا root) …"
-  if "$VENV_PY" "$SCRIPT_DIR/ocr_fetch.py"; then
-    ok "قارئ الملفات المصوّرة جاهز"
-  else
-    warn "تعذّر تنزيل OCR — البوت يعمل بدونه، والرفع لا يفشل."
-    info "للتخطّي دائمًا: أضف ZAKR_SKIP_OCR=1 في متغيّرات اللوحة"
-  fi
-  return 0
-}
-
-
 panel_precheck() {
   local missing=() placeholder=() key val
   for key in BOT_TOKEN OWNER_ID STORAGE_CHANNEL; do
@@ -1427,7 +1075,7 @@ EOH
 
 
 # ------------------------------------------------ التدفّق الرئيسي
-MODE="start"
+MODE="install"
 OPT_TOKEN=""; OPT_OWNER=""; OPT_CHANNEL=""
 # قيم من البيئة (الطريقة الآمنة: لا تظهر في ps ولا في سجل الأوامر)
 BOT_TOKEN_SRC="${ZAKR_BOT_TOKEN:-${BOT_TOKEN:-}}"
@@ -1451,12 +1099,6 @@ for arg in "$@"; do
     *) die "خيار غير معروف: $arg   (استخدم --help)" ;;
   esac
 done
-
-# على لوحات الاستضافة، التشغيل الافتراضي يعني إعداد Wispbyte الكامل ثم تشغيل البوت.
-# لا نسمح بالمسار المحلي الاختياري للـOCR على الحاويات.
-if (( IS_PANEL )) && [[ "$MODE" == "start" ]]; then
-  MODE="wispbyte"
-fi
 
 printf '%s\n' "${C_HEAD}╔══════════════════════════════════════════╗${C_RESET}"
 printf '%s\n' "${C_HEAD}║   بوت ذاكر — سكربت التشغيل الكامل        ║${C_RESET}"
@@ -1491,43 +1133,31 @@ esac
 
 case "$MODE" in
   ocr)
-    # --ocr-only: فحص/تثبيت قارئ الملفات المصوّرة فقط (بلا بيئة ولا .env)
+    # --ocr-only: بقي كاسم صديق للتوافق الخلفي. لم يعد هناك ما يُثبَّت:
+    # القراءة عبر وكيل الرؤية بمفتاح المستخدم.
     step_ocr
-    # نتيجة صريحة بكود خروج: 0 = كل شيء يعمل فعلًا
-    if ocr_verify >/dev/null 2>&1; then
-      ok "الفحص: tesseract + poppler + العربية تعمل كلها"
-      ocr_probe_cleanup; exit 0
-    else
-      ocr_probe_cleanup
-      die "قارئ الملفات المصوّرة غير جاهز — راجع الرسائل أعلاه"
-    fi ;;
+    exit 0 ;;
   wispbyte)
-    # وضع اللوحة: اقرأ Variables أولًا، لكن اسمح بالإدخال من Console إذا كانت تفاعلية.
-    info "وضع لوحة الاستضافة (Wispbyte/Pterodactyl) — Variables أو إدخال Console"
-    # توحيد الأسماء البديلة التي تستخدمها بعض لوحات الاستضافة.
-    [[ -n "${BOT_TOKEN:-}" ]] || BOT_TOKEN="${ZAKR_BOT_TOKEN:-}"
-    [[ -n "${OWNER_ID:-}" ]] || OWNER_ID="${ZAKR_OWNER_ID:-}"
-    [[ -n "${STORAGE_CHANNEL:-}" ]] || STORAGE_CHANNEL="${ZAKR_STORAGE_CHANNEL:-}"
-    export BOT_TOKEN OWNER_ID STORAGE_CHANNEL
-    if [[ ! -t 0 && "${ZAKR_INTERACTIVE_SETUP:-0}" != "1" ]]; then
-      NO_INPUT=1; export NO_INPUT
-    fi
+    # وضع اللوحة: آلي بالكامل بلا أي سؤال. الإعدادات من variables اللوحة.
+    NO_INPUT=1; export NO_INPUT
+    info "وضع لوحة الاستضافة (Wispbyte/Pterodactyl) — الإعدادات من Variables"
+
+    # (أ) نتحقق أولًا: لا معنى لتثبيت كل شيء ثم الفشل في آخر خطوة
+    panel_precheck || exit 1
 
     step_python
     step_venv
     step_env          # يقرأ .env إن وُجد، لكن متغيّرات اللوحة تفوز
-    # المسار الموحّد: self_install.py يثبّت حزم بايثون+النظام ويتحقّق بالاستيراد.
-    # لو غاب (نسخة قديمة) نرجع إلى panel_ocr_fetch كاحتياط.
+    # المسار الموحّد: self_install.py يثبّت حزم بايثون ويتحقّق بالاستيراد.
     if [[ -f "$SCRIPT_DIR/self_install.py" ]]; then
-      ZAKR_WISPBYTE_MODE=1 ZAKR_INSTALL_OCR=1 "$VENV_PY" "$SCRIPT_DIR/self_install.py" \
-        || die "فشل التجهيز الإجباري على Wispbyte — لن يبدأ البوت بنواقص."
-    else
-      die "self_install.py مفقود — لا يمكن تثبيت كل الاعتماديات المطلوبة."
+      "$VENV_PY" "$SCRIPT_DIR/self_install.py" \
+        || warn "التجهيز الذاتي لم يُكمل — سأكمل، لكن راجع الرسائل أعلاه."
     fi
     step_selfcheck    # يفشل (set -e) لو الإعدادات غير سليمة
 
     ok "الإعداد اكتمل — تشغيل البوت …"
-    ZAKR_SETUP_COMPLETE=1 PYTHONUNBUFFERED=1 exec "$VENV_PY" -u "$SCRIPT_DIR/main.py" ;;
+    # shellcheck disable=SC2086
+    exec "$VENV_PY" -u main.py ;;
   docker)  step_python; step_env; run_docker; exit 0 ;;
   systemd) step_python; step_venv; step_env; step_selfcheck; run_systemd; exit 0 ;;
 esac
@@ -1547,7 +1177,7 @@ case "$MODE" in
 ${C_OK}✔ التثبيت اكتمل${C_RESET}
 
 التشغيل الآن:
-   ./setup.sh --start          ${C_DIM}# أو:${C_RESET} bash setup.sh --start
+   ./setup.sh --start          ${C_DIM}# أو:${C_RESET} source $VENV_DIR/bin/activate && python main.py
 
 دايمًا في الخلفية:
    ./setup.sh --systemd        ${C_DIM}# خدمة systemd (يسألك sudo)${C_RESET}

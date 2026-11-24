@@ -18,7 +18,7 @@ bash setup.sh --no-start
 python setup.py --no-start   # أو: python main.py (يجهّز ويشغّل)
 ```
 
-> كلاهما مسار مستقل: `setup.py` ببايثون و`setup.sh` بـBash؛ يجب اختبارهما عند تعديل خطوات الإعداد.
+> الأمران متكافئان: `setup.py` يفوّض إلى `setup.sh` (مصدر واحد للحقيقة).
 
 ثم املأ `.env` (أو انسخ من `.env.example`) وشغّل:
 
@@ -35,13 +35,15 @@ pip install -r requirements.txt
 python -m pytest -q
 ```
 
-المتوقّع في لقطة المشروع الحالية: **12 اختبارًا ناجحًا**. اختبارات التكامل
-الخاصة بتيليجرام والاستضافة الفعلية تُجرى في بيئة مجهّزة منفصلة.
+المتوقّع: **735 ناجح / 2 متخطّى**. المتخطّى يكون شبكة/حزم غير متوفّرة —
+ليس فشلًا.
 
 ### تشغيل جزء واحد
 
 ```bash
-python -m pytest tests/test_runtime_smoke.py -q      # اختبارات الإقلاع والإعداد
+python -m pytest tests/test_material_edit.py -q    # تعديل المواد
+python -m pytest tests/test_explain_material.py -q # الشرح من مادة
+python -m pytest tests/test_new_flows.py -q        # تدفّق المعالجات
 ```
 
 ---

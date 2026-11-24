@@ -40,13 +40,6 @@ class StoredObject:
     mime_type: str | None = None
 
 
-@dataclass(frozen=True)
-class DownloadedFile:
-    data: bytes
-    filename: str
-    mime_type: str | None = None
-
-
 class StorageError(Exception):
     pass
 

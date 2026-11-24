@@ -17,7 +17,7 @@ from collections.abc import Sequence
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import ConfigAudit, User, utcnow
+from ..models import ConfigAudit, User
 
 log = logging.getLogger(__name__)
 
@@ -153,6 +153,3 @@ def describe(entry: ConfigAudit) -> str:
     return f"{outcome} {when} · {who} · {entry.key}: {old} ← {new}"
 
 
-def now_stamp() -> str:
-    """طابع زمني مقروء — تستخدمه شاشة سجل التدقيق."""
-    return utcnow().strftime("%Y-%m-%d %H:%M")

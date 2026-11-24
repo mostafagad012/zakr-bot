@@ -27,7 +27,6 @@
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -36,9 +35,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-# أدوات مشتركة — كانت منسوخة حرفيًا في ثلاثة ملفات (setup.py/setup_deps.py/ocr_fetch.py)
-from runtime_setup import load_configuration, prompt_missing, diagnose, _valid  # noqa: E402
-
+# أدوات مشتركة — كانت منسوخة حرفيًا في عدة ملفات إعداد
 from setup_common import (  # noqa: E402
     C,
     bad,
@@ -73,8 +70,22 @@ def is_container() -> bool:
 
 # ────────────────────────────────────────────────── قراءة متغيّرات البيئة
 def load_env_file() -> None:
-    """Load .env defaults without overwriting panel environment variables."""
-    load_configuration()
+    """يقرأ .env **بلا الكتابة فوق** متغيرات البيئة الموجودة.
+
+    مهم على Wispbyte: المتغيرات تأتي من لوحة التحكّم، ويجب أن تفوز على أي
+    ملف قديم. `os.environ.setdefault` تحقّق ذلك.
+    """
+    if not ENV_FILE.is_file():
+        return
+    for raw in ENV_FILE.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = val
 
 
 def env_value(key: str) -> str:
@@ -85,7 +96,8 @@ def env_value(key: str) -> str:
 def step_self_install() -> int:
     """يُفوّض إلى `self_install.py` — مصدر واحد للتثبيت على كل المنصّات.
 
-    يجهّز البيئة قبل استيراد أي حزمة خارجية؛ ثم يُشغّل وحدة البوت مباشرةً.
+    لماذا لم نُبقِ المنطق هنا؟ لأن `main.py` يحتاجه **قبل** أن يستورد أي
+    حزمة خارجية. تكراره في مكانين يعني انحرافًا مؤكّدًا بين المسارين.
     """
     head("1/4 التثبيت الذاتي (بايثون + نظام)")
     script = ROOT / "self_install.py"
@@ -154,49 +166,10 @@ def step_env(*, no_input: bool) -> int:
     return 0
 
 
-def _save_env_values(values: dict[str, str]) -> None:
-    """يحفظ القيم الناقصة في .env مع الحفاظ على بقية الإعدادات."""
-    lines = ENV_FILE.read_text(encoding="utf-8").splitlines() if ENV_FILE.exists() else []
-    updated: set[str] = set()
-    output: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped and not stripped.startswith("#") and "=" in stripped:
-            key = stripped.partition("=")[0].strip()
-            if key in values:
-                output.append(f"{key}={values[key]}")
-                updated.add(key)
-                continue
-        output.append(line)
-    for key, value in values.items():
-        if key not in updated:
-            output.append(f"{key}={value}")
-    ENV_FILE.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
-    try:
-        ENV_FILE.chmod(0o600)
-    except OSError:
-        pass
-    for key, value in values.items():
-        os.environ[key] = value
-
-
-def prompt_missing_env() -> None:
-    """Ask for missing/invalid settings in the attached startup console."""
-    unresolved = prompt_missing()
-    if unresolved:
-        diagnose()
-
-
 def step_config_check() -> int:
     head("3/4 التحقق من الإعدادات")
 
-    # اسأل المستخدم عن النواقص قبل إعلان الفشل؛ على لوحات الاستضافة
-    # غير التفاعلية تظهر تعليمات واضحة بدل انتظار إدخال لن يصل.
-    missing_or_example = [k for k in REQUIRED_VARS if not _valid(k, env_value(k))]
-    if missing_or_example:
-        prompt_missing_env()
-
-    missing = [k for k in REQUIRED_VARS if not _valid(k, env_value(k))]
+    missing = [k for k in REQUIRED_VARS if not env_value(k)]
     for key in REQUIRED_VARS:
         val = env_value(key)
         if key == "BOT_TOKEN":
@@ -307,38 +280,26 @@ def step_features() -> int:
     return 0
 
 
-# ─────────────────────────────────────── قارئ الملفات المصوّرة (OCR)
+# ───────────────────────────────── قراءة الملفات المصوّرة
 def step_ocr() -> int:
-    """ينزّل tesseract محليًا لو غير متوفّر — بلا root وبلا apt.
+    """قراءة الملفات المصوّرة — لا شيء يُثبَّت.
 
-    على لوحات الاستضافة (Wispbyte/Pterodactyl) لا يوجد `apt install`.
-    `ocr_fetch.py` ينزّل الحزم في `.ocr/` ويجعل البوت يراها تلقائيًا.
+    كانت هذه الدالة تنزّل tesseract وpoppler كملفات .deb وتستخرجها بلا
+    root. أُزيل المسار كليًا: القراءة الآن عبر وكيل الرؤية الذي يختاره
+    المستخدم بمفتاحه، وتحويل PDF→صورة داخل بايثون بـPyMuPDF.
     """
-    head("قارئ الملفات المصوّرة (اختياري)")
-
-    # هل يعمل أصلًا؟
+    head("قارئ الملفات المصوّرة")
     try:
-        sys.path.insert(0, str(ROOT))
-        from bot.services import ocr as ocr_service
+        import importlib.util
 
-        if ocr_service.is_available():
-            langs = ocr_service.installed_languages()
-            ok("tesseract يعمل" + (f" — اللغات: {', '.join(langs)}" if langs else ""))
-            if "ara" not in langs:
-                warn("العربية (ara) غير موجودة — OCR العربي لن يعمل")
-            return 0
-    except Exception as exc:  # noqa: BLE001
-        info(f"تعذّر فحص OCR: {exc}")
-
-    warn("tesseract غير متوفّر — البوت يعمل، لكن الملفات المصوّرة لن تُقرأ")
-
-    if platform_name() == "termux":
-        info("أندرويد: pkg install tesseract poppler")
-        return 0
-
-    # التنزيل نفسه يقوم به self_install.py (خطوة ②) — لا نُكرّر المنطق هنا.
-    warn("tesseract غير متوفّر — البوت يعمل، لكن الملفات المصوّرة لن تُقرأ")
-    info("أعد تشغيل التجهيز لإعادة المحاولة، أو أضف ZAKR_SKIP_OCR=1 للتخطّي.")
+        if importlib.util.find_spec("pymupdf") or importlib.util.find_spec("fitz"):
+            ok("جاهز — تحويل PDF→صورة داخل بايثون (بلا poppler)")
+        else:
+            warn("PyMuPDF غير مثبَّت — الملفات المصوّرة لن تُقرأ")
+            info("أصلحه بـ: pip install -r requirements.txt")
+        info("القراءة تتم عبر وكيل الرؤية الذي يختاره كل مستخدم بمفتاحه.")
+    except Exception as exc:        # noqa: BLE001 — فحص لا يُسقط التجهيز
+        info(f"تعذّر الفحص: {type(exc).__name__}")
     return 0
 
 
@@ -349,13 +310,10 @@ def run_bot() -> int:
     print(flush=True)
 
     # نقطة الدخول الموحّدة (تحتوي التجهيز الذاتي والتنظيف والمنفذ الصحي)
-    cmd = [sys.executable, "-u", str(ROOT / "main.py")]
+    cmd = [sys.executable, "-u", "main.py"]
     env = dict(os.environ)
     env.setdefault("PYTHONUNBUFFERED", "1")
     env.setdefault("PYTHONPATH", str(ROOT))
-    # ملفات setup أنهت التثبيت والفحص؛ شغّل وحدة البوت مباشرةً.
-    env["ZAKR_SETUP_COMPLETE"] = "1"
-    env["PYTHONUNBUFFERED"] = "1"
 
     try:
         proc = subprocess.run(cmd, cwd=str(ROOT), env=env)
@@ -389,17 +347,15 @@ def _find_bash() -> str | None:
 
 
 def should_delegate(argv: list[str], bash: str | None) -> bool:
-    """اجعل setup.sh المسار التنفيذي الوحيد متى كان Bash متاحًا.
+    """هل نُفوّض إلى setup.sh؟ **قرار صرف** قابل للاختبار بلا آثار جانبية.
 
-    setup.py واجهة مريحة لبيئات التشغيل التي تستدعي Python؛ أما كل خطوات
-    التجهيز والتشغيل فتظل في setup.sh. عند غياب Bash نستخدم المسار الاحتياطي
-    المكتوب ببايثون داخل هذا الملف.
+    التفويض يحدث فقط لو: (أ) طُلب صراحةً، (ب) bash موجود فعلًا.
+    غياب bash ليس فشلًا — بل يُكمل المسار الكامل ببايثون.
     """
     if "--python-only" in argv:
         return False
-    # setup.py هو واجهة Python، لكنه يفوّض دائمًا إلى setup.sh عند توافر Bash؛
-    # بذلك يظل ملفا الإعداد هما المصدر الوحيد لمسار التثبيت والتشغيل.
-    return bash is not None
+    requested = any(f in argv for f in ("--install", "--no-start", "--test", "--start"))
+    return requested and bash is not None
 
 
 def run_setup_sh(argv: list[str]) -> int:
@@ -452,8 +408,6 @@ def run_setup_sh(argv: list[str]) -> int:
 def main(argv: list[str]) -> int:
     global _FORCE_PANEL
     _FORCE_PANEL = "--wispbyte" in argv
-    if "--no-input" in argv:
-        os.environ["ZAKR_NO_PROMPT"] = "1"
     do_check = "--check" in argv
     no_start = "--no-start" in argv or "--install" in argv
     no_input = "--no-input" in argv or is_container() or "--wispbyte" in argv
@@ -477,7 +431,7 @@ def main(argv: list[str]) -> int:
     if do_check:
         head("فحص البيئة (بلا تعديل)")
         for mod in ("aiogram", "sqlalchemy", "aiosqlite", "alembic",
-                    "pypdf", "httpx", "openpyxl", "PIL", "pytesseract", "numpy"):
+                    "pypdf", "httpx", "openpyxl", "PIL", "pymupdf"):
             try:
                 __import__(mod)
                 info(f"✔ {mod}")
@@ -490,8 +444,8 @@ def main(argv: list[str]) -> int:
 
     # التثبيت إجباري دائمًا — هذا هو طلب المستخدم: يعمل كل شيء بلا خطوة يدوية.
     # self_install.py هو المسار **الوحيد**: يثبّت حزم بايثون ويتحقّق منها
-    # بالاستيراد، ثم يوصل tesseract/poppler **بلا root** (تنزيل .deb واستخراجها
-    # في .ocr/) — وهو ما يجعل البوت يعمل على Wispbyte وأي حاوية بلا صلاحيات.
+    # بالاستيراد الفعلي. لا حزم نظام إطلاقًا — وهو ما يجعل البوت يعمل على
+    # Wispbyte وأي حاوية بلا صلاحيات (وهو أصل المشكلة التي حلّها الملف).
     rc = step_self_install()
     if rc != 0:
         return rc
@@ -521,9 +475,9 @@ def main(argv: list[str]) -> int:
 
 USAGE = f"""{C.bold}الاستخدام:{C.reset}
   python setup.py              تثبيت ذاتي + تجهيز + فحص + تشغيل (أي منصّة)
-  لا تشغّل main.py مباشرة؛ استخدم setup.py أو setup.sh فقط.
-  python setup.py --install    إعداد كامل بلا تشغيل
-  python setup.py --test       إعداد ثم تشغيل الاختبارات
+  python main.py               نفس الشيء عبر main.py — نقطة الدخول الموحّدة
+  python setup.py --install    إعداد كامل بلا تشغيل (يفوّض إلى setup.sh)
+  python setup.py --test       إعداد ثم تشغيل الاختبارات (يفوّض إلى setup.sh)
   python setup.py --python-only نفّذ نسخة بايثون (بلا تفويض)
   python setup.py --no-start   جهّز كل شيء ولا تشغّل
   python setup.py --check      فحص سريع بلا تعديل
@@ -532,7 +486,7 @@ USAGE = f"""{C.bold}الاستخدام:{C.reset}
   python setup.py --help
 
 {C.bold}على Wispbyte:{C.reset} اترك Startup Command = `python setup.py`
-يمكن إدخال القيم من Console عند توفر إدخال تفاعلي، أو إضافتها في تبويب Variables.
+وأضف BOT_TOKEN و OWNER_ID و STORAGE_CHANNEL في تبويب Variables.
 """
 
 

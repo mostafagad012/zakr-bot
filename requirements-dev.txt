@@ -1,7 +1,13 @@
-# Development and test dependencies — never needed on production hosts.
+# حاجيات التطوير/الاختبار فقط — لا تُثبَّت لتشغيل البوت، ولا على الجوال.
 -r requirements.txt
--r requirements-ocr.txt
--r requirements-export.txt
+
+# للاختبارات — كانت في requirements.txt فتُثبَّت على كل لوحة استضافة بلا فائدة.
 pytest>=8.0
 pytest-asyncio>=0.24
-python-bidi>=0.6
+
+# ⚠️ python-bidi حُذف. كان مذكورًا هنا للاختبار الذي يستخدمه، لكن مراجعة
+#    الاستيرادات أثبتت أن **لا كود ولا اختبار يستورده** — ذِكرُه الوحيد كان
+#    في تعليق. ومشروعُه Rust/maturin لا ينشر عجلة أندرويد، فكان يمنع
+#    `pip install -r requirements-dev.txt` على Termux بلا مقابل.
+#    تنظيف محارف الاتجاه (bidi) يتم الآن بمحارف صريحة في
+#    `bot/services/extract.py::clean_text` بلا أي مكتبة.

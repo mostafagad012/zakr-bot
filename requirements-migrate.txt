@@ -1,0 +1,17 @@
+# حاجيات تشغيل الترحيلات (Alembic) على PostgreSQL فقط.
+#
+# لماذا ملف منفصل؟
+#   Alembic يعمل بمحرك **متزامن** وليس غير متزامن، فيحتاج psycopg2 بينما
+#   البوت يستخدم asyncpg. كان دليل الترقية يقول `pip install asyncpg` ثم
+#   `alembic upgrade head` — فيفشل الأخير بـ:
+#       ModuleNotFoundError: No module named 'psycopg2'
+#   وهذا ليس مثبَّتًا في requirements.txt لأنه لا يحتاجه التشغيل العادي
+#   (البوت يعمل بـasyncpg وحده)، ولا معنى لتحميله على مستخدمي SQLite.
+#
+# متى تحتاجه؟
+#   فقط إن كان DATABASE_URL يبدأ بـ postgresql وتريد تشغيل:
+#       alembic upgrade head
+#
+# ملاحظة: psycopg2-binary فيه مكتبة libpq مُضمَّنة — لا يحتاج بناءً ولا
+# حزم نظام، ويعمل على لوحات الاستضافة بلا root.
+psycopg2-binary>=2.9

@@ -237,16 +237,71 @@ async def set_notes(session: AsyncSession, user_id: int, notes: str) -> None:
     await session.flush()
 
 
-async def use_auto(session: AsyncSession, user_id: int) -> None:
-    """يرجع للاختيار التلقائي (من `.env`)."""
-    row = await get_or_create(session, user_id)
-    row.provider = ""
-    row.model = ""
-    row.auto_provider = True
-    await session.flush()
-
-
 # --------------------------------------------------- التطبيق على الطبقة
+async def vision_choice(
+    session: AsyncSession, user_id: int
+) -> tuple[str, str, str]:
+    """مزوّد ومفتاح وموديل **هذا المستخدم** لقراءة الملفات.
+
+    يُرجع `(provider, api_key, model)` — والمفتاح فارغ يعني «لا مفتاح
+    لهذا المستخدم»، وهو الحالة الشائعة: أكثر الطلاب لم يحفظوا مفتاحًا.
+
+    **لماذا لا نقرأ `.env` هنا إطلاقًا؟**
+
+    لأن إعدادات المزوّد في البوت **عامة يكتبها المالك** (المسار القديم
+    `ai:promote` يكتب `AI_PROVIDER` في `.env`). فلو قرأ مسار الملفات من
+    هناك لصار: طالب يرفع ملفًا ⇒ يُقرأ بمفتاح المالك ⇒ يدفع المالك عن
+    كل الكلية، ويخرج ملف الطالب باسم حساب المالك عند الطرف الثالث.
+    لذلك مسار الملفات مربوط بمفتاح المستخدم وحده، ورسالة «لا مفتاح»
+    هي النتيجة الصحيحة لا التراجع الصامت إلى مفتاح الغير.
+
+    **القواعد بالترتيب:**
+
+    ① مزوّد اختاره المستخدم صريحًا **و** يملك مفتاحه ⇒ هو.
+    ② لا اختيار صريح، لكن يملك مفتاحًا واحدًا أو أكثر ⇒ أول مزوّد
+       يدعم الرؤية من مفاتيحه (شرط أن يقرأ ملفاته أصلًا).
+    ③ الاختيار صريح لكن المفتاح مفقود ⇒ نُبلغ — لا نقترض مفتاح الغير.
+    ④ لا شيء إطلاقًا ⇒ ``("", "", "")``.
+    """
+    row = await get_row(session, user_id)
+    if row is None:
+        return "", "", ""
+
+    keys = plain_keys(row)
+    chosen = (row.provider or "").strip().lower()
+    if not chosen and not row.auto_provider:
+        chosen = ""
+
+    # ③ اختيار صريح بلا مفتاح — نقولها بدل أن نخمّن
+    if chosen and chosen in ai.PROVIDERS:
+        key = keys.get(chosen, "")
+        if key:
+            return chosen, key, (row.model or "").strip()
+        if not row.auto_provider:
+            return chosen, "", (row.model or "").strip()
+
+    # ② لا اختيار: نبحث عن أوّل مفتاح لمزوّد يقدر على الصور
+    try:
+        from .extract import supports_vision
+
+        vision_keys = [
+            name for name in keys
+            if keys[name] and supports_vision(name)
+        ]
+    except ImportError:          # pragma: no cover — استيراد دائري محتمل
+        vision_keys = []
+    if vision_keys:
+        first = vision_keys[0]
+        return first, keys[first], (row.model or "").strip()
+
+    # مفتاح موجود لمزوّد نصّي فقط — نُعيده كي تشرح الرسالة السبب بدقة
+    any_key = next((name for name in keys if keys[name]), "")
+    if any_key:
+        return any_key, keys[any_key], (row.model or "").strip()
+
+    return "", "", ""
+
+
 def env_provider() -> str:
     """المزوّد الفعّال من `.env` (أو auto). هذه هي الحقيقة الوحيدة الآن."""
     from ..config import settings as live

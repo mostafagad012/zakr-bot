@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from .. import texts
@@ -57,19 +57,6 @@ async def cb_quiz_list(callback: CallbackQuery, db_session, state: FSMContext) -
     await callback.answer()
 
 
-async def cmd_quiz(message: Message, db_session, state: FSMContext) -> None:
-    quizzes = await quiz_service.list_quizzes(db_session)
-    if not quizzes:
-        await message.answer("🧠 لا توجد كويزات بعد.")
-        return
-    builder = InlineKeyboardBuilder()
-    for quiz in quizzes[:10]:
-        builder.row(InlineKeyboardButton(
-            text=f"🧠 {escape(quiz.title[:36])}", callback_data=f"quiz:start:{quiz.id}"
-        ))
-    await message.answer("🧠 اختر كويزًا:", reply_markup=builder.as_markup(), parse_mode="HTML")
-
-
 @router.callback_query(F.data.startswith("quiz:start:"))
 async def cb_quiz_start(callback: CallbackQuery, db_session, state: FSMContext) -> None:
     quiz_id = int(callback.data.split(":")[-1])
@@ -107,7 +94,10 @@ async def _ask_question(message, quiz: Quiz, question, index: int, total: int) -
 
 @router.callback_query(F.data.startswith("quiz:ans:"), QuizFlow.answering)
 async def cb_quiz_answer(callback: CallbackQuery, db_session, state: FSMContext) -> None:
-    _, _, question_id, answer = callback.data.split(":")
+    # نقرأ الإجابة من الـcallback ولا نثق برقم السؤال المرسل: الترتيب
+    # المحفوظ في الحالة هو المصدر، فالسؤال لا يُقفز ولا يُكرَّر ولو ضغط
+    # المستخدم زرًّا قديمًا من رسالة سابقة.
+    _, _, _stale_question_id, answer = callback.data.split(":")
     data = await state.get_data()
     quiz_id = data.get("quiz_id")
     answers = list(data.get("answers") or [])

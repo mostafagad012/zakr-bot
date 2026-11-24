@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from aiogram import F, Router
@@ -297,16 +298,15 @@ async def on_pdf(message: Message, db_user: User, db_session, state: FSMContext)
 
     from ..services import pdf as pdf_service
 
-    extracted = pdf_service.extract_text(data)
+    extracted = await asyncio.to_thread(pdf_service.extract_text, data)
     text = extracted.text
     if not text.strip():
-        try:
-            from ..services import ocr as ocr_service
-            result = await ocr_service.extract_text_from_pdf(data)
-            text = result.text
-        except Exception as exc:
-            log.info("تعذّر OCR للامتحان: %s", type(exc).__name__)
-            text = ""
+        # ملف مصوّر: عبر وكيل الرؤية بمفتاح المستخدم — لا OCR محلي
+        from .upload import _read_with_vision
+
+        text = await _read_with_vision(
+            message, db_user, db_session, data,
+            filename="exam.pdf", mime="application/pdf") or ""
 
     try:
         await notice.delete()

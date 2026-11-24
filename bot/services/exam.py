@@ -101,11 +101,6 @@ class Exam:
     def __len__(self) -> int:
         return len(self.questions)
 
-    @property
-    def difficulty_label(self) -> str:
-        return DIFFICULTY_LABEL.get(self.difficulty, self.difficulty)
-
-
 # ------------------------------------------------------- استخراج JSON
 def _strip_code_fences(raw: str) -> str:
     """النماذج تُغلّف JSON غالبًا بأسوار ``` — نزيلها."""

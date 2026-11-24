@@ -26,7 +26,7 @@ from .. import texts
 from ..models import User
 from ..services import catalog, files as files_service
 from ..states import EditFlow
-from .helpers import back_button, escape
+from .helpers import back_button, cb_data, escape
 
 log = logging.getLogger(__name__)
 router = Router(name="materials")
@@ -35,10 +35,8 @@ MAX_CALLBACK = 60
 PAGE_SIZE = 8
 
 
-def _cd(value: str) -> str:
-    if len(value.encode()) > MAX_CALLBACK:
-        raise ValueError(f"callback_data طويل: {value}")
-    return value
+# الحارس انتقل إلى `helpers.cb_data` — نسخة واحدة بدل ثلاث.
+_cd = cb_data
 
 
 def _mode_key(mode: str) -> str:
@@ -87,19 +85,6 @@ async def _own_files_page(db_session, user_id: int, page: int) -> tuple[str, obj
     if not total:
         body += "\n\nلسه مرفعتش حاجة. ارفع ملفك الأول من الزر تحت."
     return body, builder.as_markup()
-
-
-async def show_own_files(message: Message, db_session, user_id: int,
-                         page: int = 0, *, edit: bool = True) -> None:
-    """يعرض «موادي» في رسالة — لا في `CallbackQuery`.
-
-    **لماذا `message` لا `callback`؟** لأن بعض المسارات (بعد الحذف، بعد
-    الحفظ) تحتاج عرض القائمة، وأخرى تحتاج تعديلها في مكانها. تمرير
-    `Message` صريحًا يجعل التوقيع واحدًا بلا `isinstance` هشّة تفشل مع أي
-    كائن وهمي/مغلَّف — وهو ما حدث فعلًا في الاختبار.
-    """
-    body, markup = await _own_files_page(db_session, user_id, page)
-    await message.answer(body, reply_markup=markup, parse_mode="HTML")
 
 
 @router.callback_query(F.data == "own:list")

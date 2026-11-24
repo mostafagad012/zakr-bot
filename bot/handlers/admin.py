@@ -1,7 +1,6 @@
 """لوحة الإدارة: إحصائيات، مراجعة الملفات، إدارة المواد، إدارة الصلاحيات، النسخ الاحتياطي."""
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from aiogram import F, Router
@@ -9,7 +8,7 @@ from aiogram.filters import CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.types import FSInputFile, CallbackQuery, InlineKeyboardButton, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from .. import texts
 from ..config import settings
@@ -842,13 +841,32 @@ async def cb_reindex(callback: CallbackQuery, db_user: User, db_session) -> None
     from ..services import files as files_service
 
     notice = await callback.message.answer("🔄 جارٍ إعادة الفهرسة…")
-    files = (await db_session.scalars(select(FileItem))).all()
+    # `compatibility=True` … لا: نستخدم paging صريحًا. تحميل كل الملفات في
+    # الذاكرة دفعة واحدة كان يستهلك مئات الميغابايت على مكتبة كبيرة (وحد
+    # ذاكرة اللوحات ضيّق)، و`index_file` كان يُنفَّذ داخل معاملة واحدة عملاقة
+    # تنمو مع كل ملف — فحجم الـ WAL يتضخّم ويفشل الإنهاء إن طالت العملية.
+    # الآن: معاملة كل دفعة على حدة ⇒ ذاكرة ثابتة وتقدّم محفوظ لو انقطع البوت.
+    total = await db_session.scalar(select(func.count(FileItem.id))) or 0
     count = 0
-    for item in files:
-        existing = await files_service.get_indexed_text(db_session, item.id)
-        await files_service.index_file(db_session, item, extracted_text=existing)
-        count += 1
-    await db_session.commit()
+    batch_size = 50
+    last_id = 0
+    while count < total:
+        batch = (
+            await db_session.scalars(
+                select(FileItem).where(FileItem.id > last_id)
+                .order_by(FileItem.id).limit(batch_size)
+            )
+        ).all()
+        if not batch:
+            break
+        for item in batch:
+            existing = await files_service.get_indexed_text(db_session, item.id)
+            await files_service.index_file(db_session, item, extracted_text=existing)
+            last_id = item.id
+            count += 1
+        await db_session.commit()          # لا تُفرِغ الدفعة إلا بعد كتابتها
+        if total:
+            await notice.edit_text(f"🔄 إعادة الفهرسة… {count}/{total}")
     await notice.edit_text(f"✅ أُعيدت فهرسة {count} ملف (نصيًا ودلاليًا).")
     await callback.answer(f"✅ {count} ملف")
 
@@ -860,10 +878,20 @@ async def cb_reocr(callback: CallbackQuery, db_user: User, db_session) -> None:
         await _deny(callback, "🔒 للأدمن والمالك فقط")
         return
 
-    from ..services import files as files_service, ocr as ocr_service, store
+    from ..services import extract, files as files_service, store, user_ai
 
-    if not ocr_service.is_available():
-        await callback.answer(ocr_service.status_text(), show_alert=True)
+    # الإعادة الجماعية تستهلك رصيد **مَن يضغط الزر**. لذلك نطلب أن يكون
+    # للأدمن مفتاحه الخاص صريحًا: تشغيل مئات الملفات على مفتاح المستخدمين
+    # أو على مفتاح عام غائب = فاتورة على شخص لم يطلبها.
+    provider, api_key, model = await user_ai.vision_choice(db_session, db_user.id)
+    if not api_key:
+        await callback.answer(
+            "أضف مفتاحك من ⚙️ إعدادات الذكاء الاصطناعي أولًا — "
+            "إعادة القراءة تُحاسَب على مفتاح من يشغّلها.",
+            show_alert=True)
+        return
+    if not extract.supports_vision(provider):
+        await callback.answer(extract.vision_reason(provider), show_alert=True)
         return
 
     candidates = (
@@ -900,20 +928,29 @@ async def cb_reocr(callback: CallbackQuery, db_user: User, db_session) -> None:
                 log.warning("تعذّر تنزيل %s للـ OCR: %s", item.id, exc)
                 reporter.report(idx)
                 continue
-            result = await asyncio.to_thread(
-                ocr_service.extract_text_from_pdf,
-                data, langs=settings.ocr_langs,
-                dewarp=settings.ocr_dewarp)
+            try:
+                result = await extract.extract_async(
+                    data, filename=item.original_filename or "",
+                    mime=item.mime_type or "application/pdf",
+                    provider_key=provider, api_key=api_key, model=model or None)
+            except extract.ExtractError as exc:
+                log.info("تعذّر استخراج %s: %s", item.id, exc)
+                reporter.report(idx)
+                continue
             reporter.report(idx)
-            if result.text.strip():
+            if result.ok:
                 await files_service.index_file(db_session, item, extracted_text=result.text)
                 item.text_extracted = True
                 done += 1
+                # commit لكل ملف: إعادة القراءة على ١٠٠ ملف قد تنقطع
+                # (مهلة شبكة/توكن ينتهي رصيده). بلا commit دوري يفقد
+                # المستخدم كل ما دفع ثمنه ويبدأ من الصفر.
+                await db_session.commit()
     finally:
         await reporter.finish()
     await db_session.commit()
     await callback.message.answer(
-        "✅ <b>اكتملت إعادة OCR</b>\n"
+        "✅ <b>اكتملت إعادة القراءة بالذكاء الاصطناعي</b>\n"
         f"📄 نجح: {done} من {len(candidates)} ملف.",
         parse_mode="HTML",
     )

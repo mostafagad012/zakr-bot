@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
 from . import files as files_service
-from . import ocr as ocr_service
+from . import extract as extract_service
 from . import store
 from . import users as users_service
 
@@ -88,7 +88,12 @@ async def health_report(session: AsyncSession) -> HealthReport:
             issues.append("قاعدة البيانات كبيرة — فكّر في الانتقال إلى PostgreSQL")
 
     # 5) OCR
-    lines.append(("✅ " if ocr_service.is_available() else "⚠️ ") + f"OCR: {'متاح' if ocr_service.is_available() else 'غير مثبّت (الملفات المصوّرة لن تُفهرَس)'}")
+    # قراءة الملفات المصوّرة صارت عبر وكيل الرؤية بمفتاح كل مستخدم،
+    # فلا معنى لفحص «هل tesseract مثبّت». الذي يهمّ فعليًا: أي مزوّدين
+    # يقرأون الصور أصلًا — وهذا ما نعرضه بدل حالة حزمة نظام.
+    lines.append(
+        "✅ OCR: عبر وكيل الذكاء الاصطناعي بمفتاح المستخدم "
+        f"({len(extract_service.VISION_PROVIDERS)} مزوّدًا يقرأ الصور)")
 
     # 5.5) البحث الدلالي العصبي
     from . import embeddings as embeddings_service

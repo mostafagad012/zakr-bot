@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from .. import texts
@@ -289,11 +289,6 @@ async def cb_analytics(callback: CallbackQuery, db_user: User, db_session) -> No
         reply_markup=builder.as_markup(), parse_mode="HTML",
     )
     await callback.answer()
-
-
-async def cmd_me(message: Message, db_user: User, db_session) -> None:
-    """أمر سريع لتحليلي — يعمل بلا أزرار."""
-    await message.answer(await analytics_text(db_session, db_user.id), parse_mode="HTML")
 
 
 @router.callback_query(F.data == "profile:me")

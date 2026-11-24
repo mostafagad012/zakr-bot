@@ -16,6 +16,7 @@ backups
 .env.backups
 tmp
 *.log
+# مخلفات مسار القراءة القديم — لا تدخل الصورة
 .ocr/
 .ocr-debs/
 *.deb

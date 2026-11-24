@@ -24,14 +24,45 @@ class RateLimitMiddleware(BaseMiddleware):
     حدّان: حد لحظي (ثانية) وحد دقيق (دقيقة). المشرفون والأدمن مستثنون.
     """
 
+    # سقف عدد المستخدمين المتتبَّعين في وقت واحد. بدونه كان القاموس ينمو
+    # **بلا حدّ** بعدد كل من راسل البوت يومًا ما: بوت يعمل أسابيع على لوحة
+    # بذاكرة محدودة (Wispbyte) يصل للحد ويُقتل بـ OOM. عند تجاوز السقف
+    # تُفرَّغ أقدم النوافذ — وهي أصلًا خاملة (لا رسائل داخل الدقيقة).
+    MAX_TRACKED_USERS = 5000
+
     def __init__(self, per_second: int = 3, per_minute: int = 60):
         self.per_second = per_second
         self.per_minute = per_minute
         self._hits: dict[int, deque[float]] = defaultdict(deque)
         self._warned: dict[int, float] = {}
 
+    def _evict_if_needed(self, now: float) -> None:
+        """يُفرّغ النوافذ التي انتهت صلاحيتها، ويُقبل السقف عند الضرورة.
+
+        التنظيف الدوري رخيص (لا يحدث إلا عند بلوغ السقف) ويُبقي الذاكرة ثابتة
+        مهما طال عمر العملية.
+        """
+        if len(self._hits) < self.MAX_TRACKED_USERS:
+            return
+        # ① كل نافذة لم تُسجّل رسالة خلال آخر دقيقة صارت بلا فائدة.
+        stale = [uid for uid, w in self._hits.items() if not w or now - w[-1] > 60]
+        for uid in stale:
+            self._hits.pop(uid, None)
+            self._warned.pop(uid, None)
+        # ② لا يزال فوق السقف؟ نُسقط الأقدم تنبيهًا (FIFO) حتى ينخفض.
+        if len(self._hits) >= self.MAX_TRACKED_USERS:
+            overflow = len(self._hits) - self.MAX_TRACKED_USERS + 1
+            oldest = sorted(self._warned, key=self._warned.get)[:overflow]
+            for uid in oldest:
+                self._warned.pop(uid, None)
+                self._hits.pop(uid, None)
+            if not oldest:                       # احتياط: لا مفاتيح للترتيب
+                for uid in list(self._hits)[:overflow]:
+                    self._hits.pop(uid, None)
+
     def is_limited(self, user_id: int, now: float | None = None) -> bool:
         now = now if now is not None else time.monotonic()
+        self._evict_if_needed(now)
         window = self._hits[user_id]
         while window and now - window[0] > 60:
             window.popleft()

@@ -7,22 +7,20 @@
 Wispbyte · Railway · Render · Koyeb · Fly.io · Northflank · Pterodactyl ·
 VPS · Replit · Google Cloud Run... أو على جهازك.
 
-**ما يفعله بالترتيب:**
-  ⓪ يفحص الإعدادات الأساسية ويطلب القيم الناقصة من Console إذا كانت تفاعلية.
+**ما يفعله بالترتيب (كل شيء إجباري، بلا سؤال واحد):**
 
   ① يتأكد أن حزم بايثون الأساسية موجودة، ويُثبّت الناقص (بلا root).
   ② يتحقّق من متغيّرات البيئة (على اللوحات) أو ينشئ `.env` (على سيرفر).
-  ③ يوصّل tesseract/poppler لقراءة الملفات المصوّرة — بلا root:
-     تنزيل .deb + استخراج في `.ocr/` (أو pkg على أندرويد).
+  ③ يتحقّق من حزم بايثون كلها بالاستيراد الفعلي (لا بوجودها في pip).
   ④ ينظّف الملفات المؤقتة الزائدة.
   ⑤ يُشغّل البوت.
+
+**قراءة الملفات المصوّرة** لم تعد تعتمد على tesseract: تُمرَّر الصفحات
+على وكيل الرؤية الذي يختاره المستخدم، بمفتاحه هو. لا حزم نظام، ولا root.
 
 **لماذا هذا الملف ضروري؟** لأن اللوحات لا تعطي طرفية تفاعلية: لا سؤال، ولا
 `sudo`، ولا `apt`. وأي خطوة ناقصة تعني بوتًا لا يقلع. هنا الخطوات كلها
 داخل أمر واحد — وهو الشرط الوحيد الذي تسمح به كل اللوحات.
-
-⚠️ ملاحظة: إذا كانت لوحة الاستضافة لا تمرر stdin، فعّل ZAKR_INTERACTIVE_SETUP=1
-   إن كانت Console تدعم الإدخال، أو أدخل القيم في Variables.
 
 ⚠️ ملاحظة صدق: هذا الملف لا يُنشئ سيرفر HTTP، لأن البوت يعمل بـlong-polling
    ولا Webhook. المنصّات التي **تشترط** منفذًا تفتحه (Render/Koyeb) تحتاج
@@ -33,6 +31,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -44,45 +43,96 @@ def _say(message: str) -> None:
     print(message, flush=True)
 
 
-def bootstrap() -> int:
-    """تهيئة صارمة على Wispbyte؛ لا تشغيل قبل نجاح كل متطلبات المنصة."""
-    # setup.sh/setup.py قد أنهيا التثبيت والفحص بالفعل؛ لا نكرر تنزيل الحزم.
-    if os.environ.get("ZAKR_SETUP_COMPLETE") == "1":
-        _say("• تم تجهيز المنصة وفحصها بواسطة setup script — تخطي التثبيت المكرر.")
-        return 0
+def _spawn_background_install(script: Path, reason: str) -> None:
+    """يشغّل التجهيز الثقيل في **خلفية** بعد أن يصير البوت يخدم فعلًا.
 
-    is_wispbyte = (
-        os.environ.get("ZAKR_WISPBYTE_MODE") == "1"
-        or os.environ.get("WISPBYTE") == "1"
-        or Path("/home/container").is_dir()
-    )
-    if is_wispbyte:
-        os.environ["ZAKR_WISPBYTE_MODE"] = "1"
-        os.environ["ZAKR_INSTALL_OCR"] = "1"
-        os.environ.pop("ZAKR_SKIP_OCR", None)
-        script = ROOT / "self_install.py"
-        if not script.is_file():
-            _say("✖ self_install.py غير موجود؛ لا يمكن تجهيز Wispbyte.")
-            return 1
-        import subprocess
-        _say("• Wispbyte: تثبيت وفحص جميع المكتبات وأدوات OCR قبل التشغيل …")
-        proc = subprocess.run([sys.executable, "-u", str(script)], cwd=str(ROOT))
-        if proc.returncode != 0:
-            _say("✖ فشل التجهيز الإجباري. تم إيقاف التشغيل لمنع تشغيل نسخة ناقصة.")
-            return proc.returncode or 1
-        return 0
+    ⚠️ العِلّة التي أُصلحت هنا (سبب «البوت بيبطأ الاستضافة»):
+    كان `bootstrap()` ينادي `subprocess.run([... self_install.py])` **بشكل
+    حاجب قبل** فتح اتصال تيليجرام. على لوحة تمسح القرص عند كل إعادة تشغيل
+    يعني ذلك إعادة تنزيل حزم النظام + فكّها + حلّ المكتبات
+    **قبل** أن يخدم البوت تحديثًا واحدًا — عشرات الثواني إلى دقائق من
+    قرص وشبكة وCPU مشغولة، واللوحة ترى خدمة لا تستجيب فتصنّفها بطيئة أو
+    معلّقة وتُعيد تشغيلها (فتبدأ من الصفر مرة أخرى).
 
-    required_modules = ["aiogram", "sqlalchemy", "aiosqlite", "pypdf", "httpx"]
-    database_url = os.environ.get("DATABASE_URL", "").lower()
-    if database_url.startswith(("postgres://", "postgresql://", "postgresql+asyncpg://")):
-        required_modules.append("asyncpg")
-    if os.environ.get("ZAKR_INSTALL_OCR") == "1":
-        required_modules.extend(["PIL", "numpy", "pytesseract", "pdf2image"])
-    if os.environ.get("ZAKR_INSTALL_OPTIONAL") == "1":
-        required_modules.extend(["PIL", "numpy", "pytesseract", "pdf2image", "openpyxl"])
+    الآن: البوت يقلع ويستقبل التحديثات فورًا، والتجهيز يكمل في الخلفية.
+    مخرجاته تُكتب في ملف سجل حتى لا تضيع ولا تُلوّث مخرجات البوت.
+    """
+    import subprocess
 
+    log_path = ROOT / "data" / "install.log"
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = log_path.open("a", encoding="utf-8")
+    except OSError:
+        handle = None
+
+    say = f"• {reason} — يجرى في الخلفية، والبوت يعمل الآن."
+    _say(say)
+    try:
+        subprocess.Popen(          # noqa: S603 — مسار داخلي ثابت لا مُدخل مستخدم
+            [sys.executable, str(script), "--quiet"],
+            cwd=str(ROOT),
+            stdout=handle or subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,   # لا يموت مع أي إشارة موجّهة للمجموعة
+        )
+    except OSError as exc:
+        _say(f"⚠ تعذّر بدء التجهيز في الخلفية ({type(exc).__name__}) — البوت يكمل.")
+    finally:
+        if handle is not None:
+            handle.close()
+
+
+_VERIFIED_STAMP = ".deps-verified"
+# مهلة صلاحية بصمة التحقّق: ٢٤ ساعة. خلالها لا نُكلّف أنفسنا subprocess في
+# كل إقلاع؛ وبعدها (أو لو تغيّر requirements.txt) نُعيد التحقّق الكامل.
+_VERIFIED_TTL = 24 * 3600
+
+
+def _requirements_fingerprint() -> str:
+    """بصمة محتوى requirements.txt — تغيّرها يعني ضرورة إعادة التحقّق."""
+    import hashlib
+
+    req = ROOT / "requirements.txt"
+    try:
+        return hashlib.sha256(req.read_bytes()).hexdigest()[:16]
+    except OSError:
+        return "unknown"
+
+
+def _deps_verified() -> bool:
+    """هل تحقّقنا من كل الحاجيات حديثًا وبنفس القائمة؟"""
+    stamp = ROOT / "data" / _VERIFIED_STAMP
+    try:
+        raw = stamp.read_text(encoding="utf-8").strip().split("\n")
+        fingerprint, when = raw[0], float(raw[1])
+    except (OSError, ValueError, IndexError):
+        return False
+    if fingerprint != _requirements_fingerprint():
+        return False
+    return (time.time() - when) < _VERIFIED_TTL
+
+
+def _mark_deps_verified() -> None:
+    stamp = ROOT / "data" / _VERIFIED_STAMP
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(
+            f"{_requirements_fingerprint()}\n{time.time()}", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def bootstrap(background: bool = True) -> int:
+    """يتحقّق من جاهزية البوت — **سريع**، ولا ينزّل شيئًا ثقيلًا في المسار الحرج.
+
+    الحزم الأساسية وحدها إجبارية قبل الإقلاع (بلا aiogram لا يوجد بوت أصلًا).
+    أما التحقّق الكامل من بقية الحزم فيذهب للخلفية: البوت يخدم التحديثات
+    فورًا. (قراءة الصور لم تعد تحتاج تثبيتًا — صارت عبر وكيل المستخدم.)
+    """
     missing = []
-    for module in required_modules:
+    for module in ("aiogram", "sqlalchemy", "aiosqlite", "pypdf", "httpx"):
         try:
             __import__(module)
         except Exception:            # noqa: BLE001
@@ -91,87 +141,71 @@ def bootstrap() -> int:
     script = ROOT / "self_install.py"
     forced = os.environ.get("ZAKR_SELF_INSTALL") == "1"
 
-    # ── OCR أيضًا يُفحص هنا، لا وقت حاجته
-    # سبب حقيقي: صورة فيها حزم بايثون (pip install -r) بلا tesseract ⇒
-    # كان البوت يقلع ويقول «OCR معطّل» عند أول صورة، بلا محاولة إصلاح.
-    # الآن نحاول التوفير عند الإقلاع — مرة واحدة فقط (علامة `.ocr/.attempted`)
-    # كي لا نُعيد تنزيل ١٦٠ ميجا عند كل إعادة تشغيل على لوحة تمنعه.
-    ocr_needed = False
-    if os.environ.get("ZAKR_INSTALL_OCR") == "1" and os.environ.get("ZAKR_SKIP_OCR") != "1":
-        try:
-            from bot.services import ocr as _ocr
+    if missing:
+        # الحزم الأساسية إجبارية ولا تُؤجَّل: بلا aiogram لا يوجد بوت.
+        if not script.is_file():
+            _say("✖ حزم بايثون ناقصة وملف self_install.py غير موجود.")
+            _say("  شغّل: pip install -r requirements.txt")
+            return 1
+        if background:
+            _spawn_background_install(
+                script, f"تنزيل الحزم الناقصة: {', '.join(missing)}")
+            return 0                      # نكمل: ربما فشل الاستيراد فقط في الفحص
+        import subprocess
 
-            if not _ocr.is_available():
-                marker = ROOT / ".ocr" / ".attempted"
-                if forced or os.environ.get("ZAKR_FORCE_OCR") == "1" or not marker.exists():
-                    ocr_needed = True
-                    _say("• قارئ الملفات المصوّرة غير متوفّر — محاولة توفيره بلا root …")
-        except Exception:            # noqa: BLE001 — لا نُسقط الإقلاع لفحص OCR
-            pass
+        _say(f"• تجهيز تلقائي (ناقص: {', '.join(missing)}) …")
+        proc = subprocess.run([sys.executable, str(script)], cwd=str(ROOT))  # noqa: S603
+        return 0 if proc.returncode == 0 else proc.returncode
 
-    if not missing and not forced and not ocr_needed:
-        return 0                  # كل شيء موجود — لا نُضيّع ثانية واحدة
+    # ── التحقّق الكامل **كل إقلاع** (لا عند النقص فقط)
+    #  «تنزيل كامل لكل حاجاته إجباريًا» يعني: لا نكتفي بأن `import aiogram`
+    #  نجح. قد تكون الحزمة موجودة بإصدار قديم، أو ناقصة الاعتماديات الداخلية،
+    #  أو تالفة جزئيًا — والاستيراد ينجح ثم يفشل الاستخدام وقت التشغيل.
+    #  المرور على `setup_deps.py --check` يتحقّق بالاستيراد الفعلي لكل حزمة
+    #  في `requirements.txt`، ويكتشف النقص **قبل** أن يراه المستخدم كخطأ.
+    if script.is_file() and not missing:
+        need_full = forced or not _deps_verified()
+        if need_full:
+            if background:
+                _spawn_background_install(script, "التحقّق الكامل من كل الحاجيات")
+            else:
+                import subprocess
 
-    if not script.is_file():
-        _say("✖ حزم بايثون ناقصة وملف self_install.py غير موجود.")
-        _say("  شغّل: pip install -r requirements.txt")
-        return 1
+                _say("• التحقّق الكامل من كل الحاجيات …")
+                proc = subprocess.run(                  # noqa: S603
+                    [sys.executable, str(script)], cwd=str(ROOT))
+                if proc.returncode != 0:
+                    return proc.returncode
 
-    _say(f"• تجهيز تلقائي (ناقص: {', '.join(missing) or 'كل شيء موجود'}) …")
-    import subprocess
+    # ── قراءة الملفات المصوّرة: لا تثبيت على السطح إطلاقًا.
+    #  أُزيل مسار tesseract بقرار المالك، وصارت القراءة عبر وكيل الرؤية
+    #  الذي يختاره المستخدم بمفتاحه. لا حزم نظام، لا ١٥٨ ميجا تنزيل،
+    #  لا انتظار في الخلفية — وهذا يزيل أثقل خطوة كانت في الإقلاع.
 
-    proc = subprocess.run([sys.executable, str(script)], cwd=str(ROOT))
-
-    # علامة المحاولة: تمنع إعادة التنزيل الثقيل عند كل إعادة تشغيل على منصّة
-    # تمنع الحزم. تُحذف تلقائيًا لو نجح التوفير (المجلد يُنشأ مع tesseract).
-    if ocr_needed:
-        try:
-            marker = ROOT / ".ocr" / ".attempted"
-            from bot.services import ocr as _ocr
-
-            if not _ocr.is_available():
-                marker.parent.mkdir(parents=True, exist_ok=True)
-                marker.write_text("تعذّر توفير كل مكوّنات OCR", encoding="utf-8")
-        except Exception:        # noqa: BLE001
-            pass
-
-    if proc.returncode != 0:
-        _say("⚠ تعذّر إكمال التجهيز العام — سأتحقق من حزم الإقلاع الأساسية مباشرة.")
-
-    # بعض لوحات الاستضافة تشغّل pip داخل بيئة مختلفة أو يتعطّل فيها
-    # المُثبّت الموحّد. نستخدم نفس مفسّر Python الذي سيشغّل البوت، ونثبت
-    # aiogram صراحةً لأنه إطار البوت الأساسي وليس إضافة اختيارية.
-    import importlib.util
-
-    fallbacks = {
-        "aiogram": "aiogram>=3.13,<4",
-        "sqlalchemy": "SQLAlchemy[asyncio]>=2.0",
-        "aiosqlite": "aiosqlite>=0.20",
-        "pypdf": "pypdf>=5.0",
-        "httpx": "httpx>=0.27",
-    }
-    for module, requirement in fallbacks.items():
-        try:
-            present = importlib.util.find_spec(module) is not None
-        except (ImportError, ValueError):
-            present = False
-        if present:
-            continue
-        _say(f"• تثبيت الاعتمادية الأساسية الناقصة: {module} …")
-        install = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--no-cache-dir", requirement],
-            cwd=str(ROOT),
-        )
-        if install.returncode != 0:
-            _say(f"✖ فشل تثبيت {module}. تأكد أن الاستضافة تسمح بـpip والاتصال بمستودع PyPI.")
-            return install.returncode or 1
-
-    try:
-        import aiogram  # noqa: F401
-    except Exception as exc:  # noqa: BLE001
-        _say(f"✖ aiogram ما زال غير قابل للاستيراد بعد التثبيت: {exc}")
-        return 1
     return 0
+
+
+# يُضبط عند بدء الاستقبال فعليًا (من bot/main.py بعد نجاح get_me). يقرأه
+# المنفذ الصحي ليقول للوحة «جاهز» بدل «ما زال يجهّز».
+try:
+    import threading as _threading
+
+    _READY = _threading.Event()
+except Exception:                        # noqa: BLE001 — نظرية فقط
+    class _NeverReady:
+        @staticmethod
+        def is_set() -> bool:
+            return False
+
+    _READY = _NeverReady()
+
+
+def mark_ready() -> None:
+    """يُنادى من البوت بعد نجاح الاتصال بتيليجرام."""
+    try:
+        _READY.set()
+    except Exception:                    # noqa: BLE001
+        pass
 
 
 def _start_health_server() -> None:
@@ -186,12 +220,23 @@ def _start_health_server() -> None:
         return
     try:
         import threading
-        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from http.server import BaseHTTPRequestHandler, HTTPServer
 
         class _Ping(BaseHTTPRequestHandler):
             def do_GET(self):                     # noqa: N802
-                body = b'{"status":"ok","service":"zakr-bot"}'
-                self.send_response(200)
+                # حالة حقيقية لا ثابتة: 200 = يستقبل تحديثات أو جاهز للاستقبال؛
+                # 503 = ما زال يجهّز. اللوحة تفهم الحالتين وتعطي مهلة الإقلاع
+                # بدل أن تصنّف خدمة «حيّة» وهي لا تخدم أحدًا.
+                import json
+
+                ready = _READY.is_set()
+                body = json.dumps(
+                    {"status": "ok" if ready else "starting",
+                     "service": "zakr-bot",
+                     "ready": ready},
+                    ensure_ascii=False,
+                ).encode()
+                self.send_response(200 if ready else 503)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -204,52 +249,162 @@ def _start_health_server() -> None:
             def log_message(self, *args):         # صامت: لا نُلوّث سجلّ البوت
                 return
 
-        server = ThreadingHTTPServer(("0.0.0.0", int(port)), _Ping)   # noqa: S104
-        threading.Thread(target=server.serve_forever, daemon=True).start()
+        server = HTTPServer(("0.0.0.0", int(port)), _Ping)   # noqa: S104
+        server.daemon_threads = True
+        server.allow_reuse_address = True
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        # ⚠️ إثبات لا افتراض: كنا نطبع «المنفذ مفتوح» بمجرد بدء الخيط، ثم
+        # يتضح أن الخيط لم يُجدول بعد (أو أن الربط فشل بصمت) فترفض اللوحة
+        # الاتصال وتصنّف الخدمة ميتة. ننتظر قليلًا **وندقق** قبل أن نُعلن.
+        import socket as _socket
+
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            try:
+                with _socket.create_connection(("127.0.0.1", int(port)), timeout=0.3):
+                    break
+            except OSError:
+                time.sleep(0.05)
+        else:
+            _say(f"⚠ المنفذ :{port} لم يستجب بعد — البوت يكمل بلا فحص صحي")
+            return
         _say(f"• منفذ صحي على :{port} (لأن PORT مضبوط) — البوت يعمل بـlong-polling")
     except Exception as exc:                      # noqa: BLE001
         _say(f"⚠ تعذّر فتح منفذ صحي على {port}: {type(exc).__name__} — البوت يكمل")
 
 
 def _clean_junk() -> None:
-    """يحذف مخلّفات لا يحتاجها البوت ويستهلك مساحة الحاوية (حدود اللوحات ضيّقة)."""
+    """يحذف مخابئ بايثون فقط — لا يلمس أي شيء قد تحتاجه عملية تثبيت جارية.
+
+    ⚠️ كان يحذف `.ocr-debs` أيضًا — وهو المجلد المؤقت الذي كان
+    `ocr_fetch.py` يكتب فيه أثناء التنزيل، فكان يحذفه في منتصف التجهيز
+    ويُفسده. المسار أُزيل مع الـOCR اليوم، لكن القاعدة تبقى: لا نحذف إلا
+    `__pycache__` — مخلّفات لا يقرأها أحد.
+    """
     import shutil
 
     removed = 0
-    for pattern in ("**/__pycache__", ".ocr-debs", ".get-pip.py"):
-        for path in ROOT.glob(pattern):
-            if path.is_dir():
-                shutil.rmtree(path, ignore_errors=True)
-            else:
-                path.unlink(missing_ok=True)
-            removed += 1
+    for cache in ROOT.glob("**/__pycache__"):
+        shutil.rmtree(cache, ignore_errors=True)
+        removed += 1
     if removed:
-        _say(f"• نُظّفت {removed} مخلّفات (__pycache__/deb مؤقتة)")
+        _say(f"• نُظّفت {removed} مخبأ بايثون")
+
+
+USAGE = """الاستخدام:
+    python main.py               يجهّز كل شيء ثم يشغّل البوت (نقطة الدخول الموحّدة)
+    python main.py --check       فحص البيئة والحاجيات بلا تشغيل
+    python main.py --help        هذه المساعدة
+
+هذا هو الأمر الوحيد الذي تحتاجه على أي منصّة (Wispbyte / Pterodactyl /
+Railway / Render / VPS). يفتح المنفذ الصحي فورًا، ينظّف المخلفات،
+يتحقّق من الحاجيات، ثم يبدأ الاستقبال — بلا خطوات يدوية.
+
+متغيرات البيئة المطلوبة:
+    BOT_TOKEN · OWNER_ID · STORAGE_CHANNEL
+اختيارية مهمّة:
+    DATABASE_URL   (وإلا فكل إعادة نشر تمحو البيانات)
+    ZAKR_MINIMAL=1                  على اللوحات ضيّقة المساحة
+    PORT           (يفتح منفذًا صحيًا للوحات التي تتطلبه)
+"""
+
+
+def _self_check() -> int:
+    """فحص جاهزية سريع بلا أي أثر: لا منفذ صحي، لا قاعدة بيانات، لا شبكة.
+
+    الغرض: أن يعرف المستخدم **قبل** النشر إن كان شيء ناقصًا (توكن، قناة
+    تخزين، حزمة، صلاحية كتابة) بدل أن يُقلع البوت ثم يفشل بعد نصف دقيقة.
+    """
+    problems = 0
+
+    _say("══ فحص جاهزية بوت ذاكر ══")
+
+    # ① بايثون
+    _say(f"• بايثون: {sys.version.split()[0]} ({sys.executable})")
+
+    # ② الحزم الأساسية
+    for module in ("aiogram", "sqlalchemy", "aiosqlite", "pypdf", "httpx"):
+        try:
+            __import__(module)
+            _say(f"  ✔ {module}")
+        except Exception as exc:        # noqa: BLE001
+            _say(f"  ✖ {module}: {type(exc).__name__}")
+            problems += 1
+
+    # ③ متغيّرات البيئة الإلزامية
+    token = os.environ.get("BOT_TOKEN", "").strip()
+    if token:
+        looks_ok = ":" in token and len(token) > 40
+        _say(f"  ✔ BOT_TOKEN ({len(token)} حرفًا)"
+             + ("" if looks_ok else "  ⚠ الصيغة غير معتادة"))
+    else:
+        _say("  ✖ BOT_TOKEN غير مضبوط")
+        problems += 1
+    for key in ("OWNER_ID", "STORAGE_CHANNEL"):
+        if os.environ.get(key, "").strip():
+            _say(f"  ✔ {key}")
+        else:
+            _say(f"  ✖ {key} غير مضبوط")
+            problems += 1
+
+    # ④ قاعدة البيانات
+    url = os.environ.get("DATABASE_URL", "").strip()
+    if url:
+        _say(f"• قاعدة البيانات: خارجية ({url.split(':')[0]}) — تبقى بعد إعادة النشر")
+    else:
+        _say("• قاعدة البيانات: SQLite محلية — ⚠ تُمسح مع كل إعادة نشر على "
+             "اللوحات ذات القرص المؤقت. اضبط DATABASE_URL.")
+
+    # ⑤ صلاحية الكتابة
+    try:
+        (ROOT / "data").mkdir(parents=True, exist_ok=True)
+        probe = ROOT / "data" / ".write_probe"
+        probe.write_text("x", encoding="utf-8")
+        probe.unlink()
+        _say("✔ مجلد data قابل للكتابة")
+    except OSError as exc:
+        _say(f"✖ لا يمكن الكتابة في data: {type(exc).__name__}")
+        problems += 1
+
+    _say("")
+    if problems:
+        _say(f"✖ {problems} مشكلة تمنع التشغيل — أصلحها ثم أعد الفحص.")
+        return 1
+    _say("✔ كل شيء جاهز. شغّل: python main.py")
+    return 0
 
 
 def main() -> int:
-    # اسأل قبل bootstrap/import bot.config حتى لا تُحمّل Settings بقيم قديمة.
-    try:
-        from runtime_setup import prompt_missing, diagnose
-        unresolved = prompt_missing()
-        if unresolved:
-            diagnose()
-            _say("✖ لا يمكن تشغيل البوت قبل استكمال الإعدادات: " + ", ".join(unresolved))
-            return 1
-    except Exception as exc:  # لا نخفي سبب فشل التهيئة
-        _say(f"✖ تعذّر فحص الإعدادات: {type(exc).__name__}: {exc}")
-        return 1
+    # ⚠️ `--help` كان يُهمَل تمامًا: من يكتبه يبدأ تشغيلًا كاملًا يفتح
+    #    منافذ ويعدّل قاعدة البيانات. المساعدة يجب أن تكون بلا آثار.
+    argv = sys.argv[1:]
+    if "-h" in argv or "--help" in argv:
+        print(USAGE)
+        return 0
+
+    # `--check`: فحص جاهزية بلا تشغيل — لا منفذ، لا قاعدة بيانات، لا تيليجرام.
+    # مفيد قبل النشر للتأكد أن كل شيء في مكانه على المنصّة.
+    if "--check" in argv:
+        return _self_check()
 
     _say("╔══════════════════════════════════════════╗")
     _say("║  بوت ذاكر — بدء التشغيل الموحّد          ║")
     _say("╚══════════════════════════════════════════╝")
 
+    # ① المنفذ الصحي أولًا: بعض اللوحات تقتل الخدمة إن لم يُفتح منفذ سريعًا.
+    #    لو انتظرنا التجهيز لما فُتح أبدًا في الوقت المطلوب.
+    _start_health_server()
+
+    # ② تنظيف خفيف: __pycache__ فقط. لا نمشي على الشجرة كلها في كل إقلاع
+    #    (كان يمسح .deb المؤقتة أيضًا وهي تحتاجها عملية التثبيت الجارية).
+    _clean_junk()
+
+    # ③ التجهيز: لا ينزّل شيئًا ثقيلًا في المسار الحرج (انظر bootstrap).
     rc = bootstrap()
     if rc != 0:
         return rc
-
-    _clean_junk()
-    _start_health_server()
 
     # نستورد بعد التجهيز فقط — أي حزمة ناقصة تعني رسالة واضحة هنا لا انهيارًا
     try:

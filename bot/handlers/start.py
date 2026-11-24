@@ -117,17 +117,6 @@ async def cmd_start(message: Message, db_user: User, db_session, state: FSMConte
     await message.answer(text, reply_markup=main_menu(db_user), parse_mode="HTML")
 
 
-async def cmd_menu(message: Message, db_user: User, state: FSMContext) -> None:
-    await state.clear()
-    await message.answer(texts.header("home") + "\nاختر قسمًا:",
-                         reply_markup=main_menu(db_user),
-                         parse_mode="HTML")
-
-
-async def cmd_help(message: Message) -> None:
-    await message.answer(HELP_TEXT, parse_mode="HTML")
-
-
 @router.callback_query(F.data == "menu:main")
 async def cb_menu_main(callback: CallbackQuery, db_user: User,
                        state: FSMContext) -> None:

@@ -7,7 +7,7 @@
 * إيموجي وأسماء الأقسام (جدول `SECTIONS`) — غيّر من هنا ينتشر.
 * عناصر بناء الرسائل: ترويسة، فاصل، سطر معلومة، بطاقة ملف.
 * عدّاد التقدّم الحي: شريط تقدّم + زمن منقضٍ + متبقٍّ تقديري،
-  تعرضه رسالة حالة أثناء المعالجات الطويلة (OCR/رفع) — انظر
+  تعرضه رسالة حالة أثناء المعالجات الطويلة (قراءة الملفات/رفع) — انظر
   `ProgressReporter` في `handlers/helpers.py`.
 
 كل الدوال نقيّة (نص في ← نص خارج) وقابلة للاختبار بلا تيليجرام.
@@ -96,7 +96,7 @@ def processing_card(title: str, stage: str, done: int, total: int | None,
 
     تعرض: العنوان، المرحلة، صفحة/خطوة الحالية من الإجمالي، الشريط،
     المنقضي والمتبقّي التقديري — حتى يعرف المستخدم أن الملف يُعالَج
-    وفاضل قد إيه بدل رسالة «جارٍ…» صامتة قد تعلّق لدقائق (OCR).
+    وفاضل قد إيه بدل رسالة «جارٍ…» صامتة قد تعلّق لدقائق.
     """
     spinner = "⏳" if frame % 2 == 0 else "⌛"
     lines = [f"{spinner} <b>{title}</b>", f"🔧 المرحلة: {stage}"]
@@ -119,3 +119,44 @@ def steps_header(key: str, step: int, total_steps: int, title: str | None = None
     """ترويسة معالج متعدد الخطوات مع شريط: «📤 <b>رفع ملف — الخطوة 2/4</b>»."""
     base = header(key, title)
     return f"{base} — الخطوة {step}/{total_steps}\n{progress_bar(step, total_steps, width=8)}"
+
+
+# ─────────────────────────────────────────── تقسيم الردود الطويلة
+TELEGRAM_LIMIT = 4096      # الحدّ الصارم في تيليجرام
+SEND_LIMIT = 3800          # هامش أمان للترويسة والتنسيق
+
+
+def split_for_send(text: str, limit: int = SEND_LIMIT) -> list[str]:
+    """يقسّم نصًا طويلًا إلى رسائل متتابعة عند حدود الكلمات.
+
+    **لماذا هنا؟** كان التقسيم محبوسًا داخل `handlers/tutor.py`، فكل معالج
+    آخر إمّا يقتطع صامتًا (`result[:4000]` في الترجمة: الطالب يقرأ نصف
+    النص ولا يعرف) أو يُرسل كاملًا فيرفضه تيليجرام. دالة واحدة يستخدمها
+    الجميع تجعل السلوك واحدًا.
+
+    التقسيم يحترم حدود الأسطر ثم المسافات، ولا يقطع كلمة في المنتصف إلا
+    إن كانت الكلمة وحدها أطول من الحدّ.
+    """
+    remaining = (text or "").strip()
+    if not remaining:
+        return []
+    parts: list[str] = []
+    while remaining:
+        if len(remaining) <= limit:
+            parts.append(remaining)
+            break
+        window = remaining[:limit]
+        cut = max(window.rfind("\n\n"), window.rfind("\n"), window.rfind(" "))
+        if cut < limit // 2:            # لا حدّ كلمة معقول ⇒ قطع اضطراري
+            cut = limit
+        parts.append(remaining[:cut].rstrip())
+        remaining = remaining[cut:].lstrip()
+    return parts
+
+
+def split_note(total: int, limit: int = SEND_LIMIT) -> str:
+    """سطر اختياري يُلحَق بالجزء الأول حين يُقسَّم النص — الشفافية أولًا."""
+    if total <= limit:
+        return ""
+    pages = len(split_for_send("x" * total, limit))
+    return f"\n\n<i>↩️ الردّ طويل ({total} حرفًا) — سيصلك على {pages} رسائل.</i>"

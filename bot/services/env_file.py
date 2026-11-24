@@ -763,9 +763,3 @@ def restore_backup(name: str = "", path: str | Path | None = None) -> str:
     return chosen.name
 
 
-def escape_html(text: str) -> str:
-    """تهريب صغير محلي — لتفادي استيراد aiogram في طبقة الخدمات."""
-    return (str(text).replace("&", "&amp;").replace("<", "&lt;")
-            .replace(">", "&gt;"))
-
-

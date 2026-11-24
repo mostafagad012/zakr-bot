@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -12,32 +11,12 @@ def _load_dotenv(path: str | Path = ".env") -> None:
     p = Path(path)
     if not p.exists():
         return
-    # utf-8-sig يتعامل مع ملفات .env المحفوظة من محررات تضيف BOM.
-    for raw in p.read_text(encoding="utf-8-sig").splitlines():
+    for raw in p.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[7:].lstrip()
-        if "=" not in line:
+        if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        key = key.strip()
-        if not key or not (key[0].isalpha() or key[0] == "_") or not all(
-            char.isalnum() or char == "_" for char in key
-        ):
-            continue
-        value = value.strip()
-        if value[:1] in {"'", '"'}:
-            try:
-                parsed = shlex.split(value, comments=True, posix=True)
-                value = parsed[0] if parsed else ""
-            except ValueError:
-                # لا نحمّل قيمة مكسورة بصمت؛ اتركها كما كُتبت ليظهر الخطأ
-                # عند التحقق من الإعدادات بدل إسقاط بقية الملف.
-                continue
-        else:
-            value = value.split(" #", 1)[0].strip()
+        key, value = key.strip(), value.strip().strip('"').strip("'")
         os.environ.setdefault(key, value)
 
 
@@ -82,8 +61,8 @@ class Settings:
     developer_name: str = ""
     version: str = "1.0.0"
     embedding_model: str = ""
-    ocr_langs: str = ""   # فارغة = كشف تلقائي للغة من خط الصفحة
-    ocr_dewarp: bool = True  # فكّ التواء UVDoc + tesseract معًا (عطّله بـ OCR_DEWARP=0)
+    # قراءة الملفات المصوّرة صارت عبر وكيل الرؤية بمفتاح المستخدم،
+    # فلم يبقَ إعداد للمحرّك المحلي. حدود التكلفة في bot/services/extract.py.
 
     # ---------------------------------------------- الذكاء الاصطناعي (AI)
     # كل الخدمات الكبرى تعرض واجهة متوافقة مع OpenAI، فمزوّد واحد يكفي:
@@ -100,16 +79,6 @@ class Settings:
     exam_pdf_max_mb: int = 10
 
     @property
-    def ai_enabled(self) -> bool:
-        """هل طبقة الذكاء الاصطناعي جاهزة؟
-
-        ملاحظة: المفتاح قد يأتي من `.env` **أو** من مفتاح المستخدم المحفوظ
-        في قاعدة البيانات، فلا يصحّ الحكم من `ai_api_key` وحدها. الفحص
-        الحقيقي في `bot/services/user_ai.py` (المفتاح + `.env`).
-        """
-        return bool(self.ai_api_key.strip()) or self.ai_provider not in {"", "none"}
-
-    @property
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")
 
@@ -119,18 +88,49 @@ class Settings:
             return None
         return Path(self.database_url.split("///", 1)[-1])
 
+    # ---------------------------------------------- قيود لوحات الاستضافة
+    @property
+    def runs_on_panel(self) -> bool:
+        """هل نعمل على لوحة استضافة (Wispbyte/Pterodactyl/حاوية)؟
+
+        الكشف بعلامات بيئية ومن مسار المشروع — لا بالاسم وحده، لأن اللوحات
+        تشغّل من `/home/container` عادةً وتضع علامات مثل `WISPBYTE`/`SERVER_MEMORY`.
+        """
+        if os.environ.get("WISPBYTE") or os.environ.get("PTERODACTYL"):
+            return True
+        if os.environ.get("SERVER_MEMORY") or os.environ.get("CONTAINER_ENV"):
+            return True
+        if os.environ.get("VERCEL") or os.environ.get("RAILWAY_ENVIRONMENT"):
+            return True
+        try:
+            return Path("/home/container").is_dir()
+        except OSError:
+            return False
+
+    @property
+    def sqlite_is_ephemeral(self) -> bool:
+        """هل قاعدة SQLite على قرص يُمسح عند إعادة النشر؟
+
+        ⚠️ العِلّة التي يمنعها هذا الفحص: Wispbyte (وكل حاويات Pterodactyl)
+        تمسح كل ما كُتب في نظام الملفات عند إعادة النشر. البوت كان يعمل
+        بـSQLite الافتراضية بلا تحذير ⇒ كل إعادة نشر تمحو المستخدمين
+        والملفات والإعدادات، والمستخدم يرى «المكتبة فَرَغَت» بلا سبب واضح.
+        """
+        if not self.is_sqlite or not self.runs_on_panel:
+            return False
+        path = self.sqlite_path
+        if path is None:
+            return False
+        # مسار داخل وحدة تخزين دائمة يبدأ بـ/mnt أو /data أو /storage عادةً
+        text = str(path)
+        persistent_hints = ("/mnt/", "/data/", "/storage/", "/volume/", "/var/lib/")
+        if any(text.startswith(h) or f"/{h}" in text for h in persistent_hints):
+            return False
+        return True
+
     @property
     def max_upload_bytes(self) -> int:
         return self.max_upload_mb * 1024 * 1024
-
-
-def _normalize_database_url(url: str) -> str:
-    """توحيد صيغ PostgreSQL الشائعة التي تصدرها لوحات الاستضافة."""
-    if url.startswith("postgres://"):
-        return "postgresql+asyncpg://" + url[len("postgres://"):]
-    if url.startswith("postgresql://"):
-        return "postgresql+asyncpg://" + url[len("postgresql://"):]
-    return url
 
 
 def load_settings(dotenv: str | Path = ".env") -> Settings:
@@ -139,7 +139,7 @@ def load_settings(dotenv: str | Path = ".env") -> Settings:
         bot_token=_get("BOT_TOKEN"),
         owner_id=_get_int("OWNER_ID", 0),
         storage_channel=_get("STORAGE_CHANNEL"),
-        database_url=_normalize_database_url(_get("DATABASE_URL", "sqlite+aiosqlite:///./data/library_bot.db")),
+        database_url=_get("DATABASE_URL", "sqlite+aiosqlite:///./data/library_bot.db"),
         max_upload_mb=_get_int("MAX_UPLOAD_MB", 20),
         require_review=_get_bool("REQUIRE_REVIEW", True),
         backup_dir=_get("BACKUP_DIR", "./backups"),
@@ -148,8 +148,6 @@ def load_settings(dotenv: str | Path = ".env") -> Settings:
         developer_name=_get("DEVELOPER_NAME", ""),
         embedding_model=_get("EMBEDDING_MODEL", ""),
         version=_get("BOT_VERSION", "1.0.0"),
-        ocr_langs=_get("OCR_LANGS", ""),
-        ocr_dewarp=_get_bool("OCR_DEWARP", True),
         ai_provider=_get("AI_PROVIDER", "openai"),
         ai_api_key=_get("AI_API_KEY"),
         ai_provider_keys={

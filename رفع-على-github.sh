@@ -15,6 +15,29 @@
 # ═══════════════════════════════════════════════════════════════════
 set -Eeuo pipefail
 
+# ── مساعدة صريحة: بلا هذا كان `--help` يُهمَل تمامًا فيبدأ السكربت
+#  تهيئة git ورفعًا فعليًا — أي أن طلب المساعدة = رفع للمستودع.
+case "${1:-}" in
+  -h|--help|help)
+    cat <<'USAGE'
+الاستخدام:
+    bash رفع-على-github.sh              رفع المشروع إلى GitHub (تفاعلي)
+    bash رفع-على-github.sh --check      فحص أمني فقط، بلا رفع
+    bash رفع-على-github.sh --help       هذه المساعدة
+
+ما يفعله:
+  ① يهيّئ مستودع git إن لم يكن موجودًا
+  ② يفحص الأمان: لا .env، لا توكنات، لا مفاتيح، لا نموذج onnx
+  ③ يزامن .gitignore
+  ④ يرفع بـ gh إن توفّر، وإلا git + توكن (لا يُخزَّن في أي ملف)
+USAGE
+    exit 0
+    ;;
+  --check)
+    CHECK_ONLY=1
+    ;;
+esac
+
 C_OK=$'\033[1;32m'; C_BAD=$'\033[1;31m'; C_WARN=$'\033[1;33m'
 C_DIM=$'\033[2m'; C_B=$'\033[1m'; C_R=$'\033[0m'
 ok()   { printf '%s✔%s %s\n' "$C_OK" "$C_R" "$*"; }
@@ -122,6 +145,16 @@ fi
 if git grep --cached -nE 'sk-[A-Za-z0-9_-]{24,}' -- ':!tests' 2>/dev/null \
    | grep -vE 'openai1234|example|Fake'; then
   bad "مفتاح API حقيقي في الكود — راجعه"; leaks=1
+fi
+
+if [[ "${CHECK_ONLY:-0}" == "1" ]]; then
+  say ""
+  if (( leaks )); then
+    bad "الفحص وجد تسريبات — أصلحها قبل الرفع."
+    exit 1
+  fi
+  ok "فحص فقط (--check) — لا تسريبات، ولم يُرفع شيء."
+  exit 0
 fi
 
 if (( leaks )); then

@@ -16,9 +16,10 @@
 فيضيع المعنى — وهذا يفسّر لماذا تخرج شروح النماذج سطحيّة على الملفات
 الكبيرة دون هذه الطبقة.
 
-⚠️ **حدود صريحة:** لا نستخرج صورًا ولا نُفسّر أشكالًا (الـOCR يقرأ النص
-فقط). إن كان الملف كله صورًا بلا نص ولا OCR متاح، نقول ذلك للمستخدم بدل
-إرجاع شرح عام يبدو كأنه قرأ الملف.
+⚠️ **حدود صريحة:** لا نُفسّر الأشكال ولا الرسوم. القراءة بالنص فقط —
+سواء من طبقة نص PDF أو عبر وكيل الرؤية الذي يختاره المستخدم. إن كان
+الملف صورًا ولم يوجد مفتاح وكيل، نقول ذلك للمستخدم بدل إرجاع شرح عام
+يبدو كأنه قرأ الملف.
 """
 from __future__ import annotations
 
@@ -121,18 +122,6 @@ class MaterialAnalysis:
     def is_usable(self) -> bool:
         """هل فيه نص يكفي للشرح؟ (تحت ٤٠ حرفًا لا يصلح)"""
         return self.char_count >= tutor.MIN_TEXT_CHARS
-
-    def summary_line(self) -> str:
-        """سطر عربي موجز يصف المادة — يُعرض أثناء التحليل."""
-        bits = [f"{self.word_count:,} كلمة".replace(",", "٬")]
-        if self.sections:
-            bits.append(f"{len(self.sections)} قسم")
-        if self.definitions:
-            bits.append(f"{len(self.definitions)} تعريف")
-        if self.equations:
-            bits.append(f"{len(self.equations)} معادلة")
-        return " · ".join(bits)
-
 
 #: عناوين أقسام شائعة في المواد الجامعية العربية والإنجليزية
 _SECTION_RE = re.compile(

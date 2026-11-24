@@ -24,6 +24,20 @@ DEFAULTS: dict[str, str] = {
 }
 
 
+# القيم المنطقية كما يكتبها المستخدم العربي والإنجليزي — مصدر واحد.
+_TRUE = {"1", "true", "yes", "on", "نعم", "مفعل", "مفعّل"}
+_FALSE = {"0", "false", "no", "off", "لا", "معطل", "معطّل"}
+
+
+def _as_bool(raw: str, default: bool) -> bool:
+    value = (raw or "").strip().lower()
+    if value in _TRUE:
+        return True
+    if value in _FALSE:
+        return False
+    return default
+
+
 async def get_raw(session: AsyncSession, key: str) -> str | None:
     return await session.scalar(select(BotSetting.value).where(BotSetting.key == key))
 
@@ -44,12 +58,7 @@ async def get_int(session: AsyncSession, key: str, default: int = 0) -> int:
 
 
 async def get_bool(session: AsyncSession, key: str, default: bool = False) -> bool:
-    raw = (await get(session, key)).strip().lower()
-    if raw in {"1", "true", "yes", "on", "نعم", "مفعل", "مفعّل"}:
-        return True
-    if raw in {"0", "false", "no", "off", "لا", "معطل", "معطّل"}:
-        return False
-    return default
+    return _as_bool(await get(session, key), default)
 
 
 async def set(session: AsyncSession, key: str, value: str) -> None:
@@ -63,10 +72,24 @@ async def set(session: AsyncSession, key: str, value: str) -> None:
 
 
 async def get_effective(session: AsyncSession) -> dict:
-    """كل الإعدادات الفعّالة دفعة واحدة — للعرض في لوحة الإدارة."""
+    """كل الإعدادات الفعّالة دفعة واحدة — للعرض في لوحة الإدارة.
+
+    **استعلام واحد لا أربعة.** كانت كل قيمة تُقرأ بنداء منفصل، فشاشة
+    الإعدادات تفتح أربع رحلات إلى القاعدة. الجدول صغير (بضعة أسطر)
+    وقراءته كلها أرخص من أربع جولات، وتضمن أيضًا رؤية متّسقة: لو تغيّر
+    إعداد بين النداءين لظهرت الشاشة بحالة لم توجد في أي لحظة.
+    """
+    rows = (
+        await session.execute(select(BotSetting.key, BotSetting.value))
+    ).all()
+    stored = {key: value for key, value in rows}
+
+    def raw(key: str) -> str:
+        return stored.get(key) or DEFAULTS.get(key, "")
+
     return {
-        "require_review": await get_bool(session, "require_review", env_settings.require_review),
-        "maintenance": await get_bool(session, "maintenance", False),
-        "bot_name": await get(session, "bot_name", "ذاكر - مساعدك الدراسى"),
-        "welcome_message": await get(session, "welcome_message", ""),
+        "require_review": _as_bool(raw("require_review"), env_settings.require_review),
+        "maintenance": _as_bool(raw("maintenance"), False),
+        "bot_name": raw("bot_name") or "ذاكر - مساعدك الدراسى",
+        "welcome_message": raw("welcome_message"),
     }

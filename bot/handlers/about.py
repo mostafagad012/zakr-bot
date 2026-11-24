@@ -7,7 +7,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from .. import texts
 from ..config import settings
-from ..services import files as files_service, ocr as ocr_service
+from ..services import files as files_service
 from ..services.monitor import human_uptime
 from .helpers import back_button, escape
 
@@ -100,7 +100,7 @@ async def cb_about_stats(callback: CallbackQuery, db_session) -> None:
         f"📦 حجم التخزين: {human_size(stats['storage_bytes'])}",
         f"🧭 ملفات مفهرسة دلاليًا: {vectors}"
         + (f" (منها {neural} بالنموذج العصبي)" if neural else " (TF-IDF)"),
-        f"🔎 OCR: {'متاح' if ocr_service.is_available() else 'غير مثبّت'}",
+        "🔎 قراءة الملفات المصوّرة: عبر وكيل الذكاء الاصطناعي بمفتاحك",
         f"🧠 التضمين العصبي: {'مفعّل' if embeddings_service.is_available() else 'معطّل'}",
     ]
     if top:

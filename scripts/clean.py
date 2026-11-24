@@ -2,8 +2,8 @@
 """تنظيف المشروع وتقليل حجمه — آمن، قابل للتكرار، ومُختبَر.
 
 **المشكلة:** الحجم الذي يهمّ فعلًا هو **الحجم المرسَل إلى المنصّة**، لا حجم
-مجلد على جهازك. `tests/ocr_corpus` وحدها 95 ميجا، والنموذج 30 ميجا،
-و`.ocr/` 27 ميجا بعد أول تثبيت. لوحات مثل Wispbyte تحدّ المساحة والذاكرة،
+مجلد على جهازك. مخلفات مسار القراءة القديم (`.ocr/` + `models/`)
+١٩٠ ميجا في النسخ القديمة، ولوحات مثل Wispbyte تحدّ المساحة والذاكرة،
 والرفع البطيء يفشل في منتصفه.
 
 **القانون الذي يتبعه هذا الملف:** لا يُحذف شيء يحتاجه التشغيل.
@@ -11,7 +11,7 @@
 
     python scripts/clean.py            # ينظّف ويطبع ما وفّره
     python scripts/clean.py --dry-run  # يعرض فقط، لا يحذف
-    python scripts/clean.py --deep     # + حذف .ocr (يُعاد تنزيله عند الإقلاع)
+    python scripts/clean.py --deep     # + حذف مخلفات OCR القديمة
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ TARGETS: tuple[tuple[str, str], ...] = (
     ("**/__pycache__", "مترجم بايثون — يُعاد إنشاؤه"),
     (".pytest_cache", "مخرجات الاختبارات"),
     (".ruff_cache", "مخرجات الفحص"),
-    (".ocr-debs", "ملفات .deb مؤقتة بعد الاستخراج"),
+    (".ocr-debs", "ملفات .deb مؤقتة من التثبيت القديم"),
     (".get-pip.py", "سكربت تنزيل مؤقت"),
     (".requirements-android.txt", "قائمة مؤقتة على أندرويد"),
     (".requirements-android-optional.txt", "قائمة مؤقتة على أندرويد"),
@@ -40,8 +40,11 @@ TARGETS: tuple[tuple[str, str], ...] = (
 
 # للتطوير فقط — تُحذف بـ--deep وحدها
 DEEP_TARGETS: tuple[tuple[str, str], ...] = (
-    (".ocr", "tesseract المنزَّل (~160MB) — يُنزَّل تلقائيًا عند الإقلاع"),
-    ("models/*.onnx", "نموذج UVDoc (~32MB) — يُنزَّل تلقائيًا عند أول استخدام"),
+    # `.ocr/` و`models/*.onnx` بقيتا هنا لأن نسخًا قديمة من المشروع قد
+    # تحمل ١٩٠ ميجا من مخلفات مسار tesseract المُزال. حذفها آمن تمامًا
+    # الآن — لا شيء يقرأها.
+    (".ocr", "مخلفات التثبيت القديم (~160MB) — لا شيء يقرأها بعد إزالة OCR"),
+    ("models/*.onnx", "نموذج فكّ الالتواء القديم (~32MB) — لم يبقَ له مستخدم"),
     ("models/*.onnx.tmp", "بقايا تنزيل ناقص"),
 )
 
@@ -93,7 +96,24 @@ def remove(path: Path, *, dry: bool) -> int:
     return freed
 
 
+USAGE = """الاستخدام:
+    python scripts/clean.py              ينظّف ويطبع ما وفّره
+    python scripts/clean.py --dry-run    يعرض ما سيُحذف فقط
+    python scripts/clean.py --deep       + حذف مخلفات OCR القديمة (.ocr/models)
+    python scripts/clean.py --help       هذه المساعدة
+
+ما يُحذف: مخبأ بايثون، مخبأ الاختبارات/الفحص، ملفات .deb المؤقتة،
+نبضة الحياة، ملفات SQLite المؤقتة. **لا** يُحذف شيء يحتاجه التشغيل:
+قاعدة البيانات والنسخ الاحتياطية و.env تبقى كما هي.
+"""
+
+
 def main(argv: list[str]) -> int:
+    # `--help` كان يُهمَل فيبدأ الحذف فعليًا عند طلب المساعدة.
+    if "-h" in argv or "--help" in argv:
+        print(USAGE)
+        return 0
+
     dry = "--dry-run" in argv
     deep = "--deep" in argv
 
@@ -122,8 +142,8 @@ def main(argv: list[str]) -> int:
     label = "سيُوفَّر" if dry else "وُفِّر"
     print(f"\n✔ {label}: {human(freed)}  →  الحجم بعد: {human(after)}")
     if not deep:
-        print("• لتقليل أكبر (وحذف tesseract والنموذج المنزَّلين): أضف --deep")
-        print("  كلاهما يُنزَّل تلقائيًا عند التشغيل التالي — لا شيء يُكسر.")
+        print("• لتقليل أكبر (وحذف مخلفات تثبيت tesseract القديم): أضف --deep")
+        print("  لا شيء يقرأها الآن — القراءة عبر وكيل الذكاء الاصطناعي.")
     return 0
 
 
