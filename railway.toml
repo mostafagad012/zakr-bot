@@ -1,0 +1,11 @@
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "python main.py"
+# البوت خدمة دائمة (long-polling) ولا يحتاج منفذ HTTP.
+# ⚠️ نسخة واحدة فقط (replicas = 1): نسختان تسحبان التحديثات من
+# تيليجرام في نفس الوقت فتتعارضان.
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

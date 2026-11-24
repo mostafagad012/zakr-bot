@@ -1,0 +1,21 @@
+# Render — نشر بنقرة (Blueprint)
+# البوت خدمة دائمة (worker) لا موقع ويب: long-polling بلا منفذ عام.
+services:
+  - type: worker
+    name: zakr-bot
+    runtime: python
+    plan: starter                 # free لا يدعم workers دائمين
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    autoDeploy: true
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: BOT_TOKEN
+        sync: false               # يُدخل في اللوحة، لا يُكتب في المستودع
+      - key: OWNER_ID
+        sync: false
+      - key: STORAGE_CHANNEL
+        sync: false
+      - key: DATABASE_URL
+        sync: false               # Supabase/Neon — Render يمسح القرص عند كل نشر

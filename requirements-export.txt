@@ -1,0 +1,3 @@
+# Optional Excel export support.
+-r requirements.txt
+openpyxl>=3.1

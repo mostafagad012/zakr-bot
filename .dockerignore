@@ -1,0 +1,26 @@
+# ما لا يدخل صورة Docker (يقلّل الحجم والبناء)
+.git
+.github
+.env
+.env.*
+!.env.example
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+tests
+data
+backups
+.env.backups
+tmp
+*.log
+.ocr/
+.ocr-debs/
+*.deb
+models/*.onnx
+docs
+*.md
+!README.md
+uploads

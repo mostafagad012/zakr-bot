@@ -1,0 +1,7 @@
+# Development and test dependencies — never needed on production hosts.
+-r requirements.txt
+-r requirements-ocr.txt
+-r requirements-export.txt
+pytest>=8.0
+pytest-asyncio>=0.24
+python-bidi>=0.6

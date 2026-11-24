@@ -1,0 +1,88 @@
+# Made with ❤️ for Arabic-speaking students.
+#
+# إعدادات GitHub Actions: تشغيل الاختبارات على كل دفعة/طلب دمج.
+# سبب الوجود: المستودع على GitHub يُستنسخ ويُعدَّل من أكثر من جهاز؛
+# هذا الفحص يمنع دمج تعديل يكسر البوت أو الاختبارات.
+name: tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: pytest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      # حزم النظام: الاختبارات تتخطّى OCR تلقائيًا عند غيابها، لكن
+      # تثبيتها يجعل المسار الحقيقي مُختبَرًا لا مُتخطّى.
+      - name: System packages (OCR)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            tesseract-ocr tesseract-ocr-ara tesseract-ocr-eng \
+            tesseract-ocr-osd poppler-utils
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          pip install ruff
+
+      - name: Lint (errors only)
+        run: ruff check --select F,E9 bot/ tests/ main.py self_install.py setup.py setup_deps.py ocr_fetch.py setup_common.py scripts/clean.py
+
+      - name: Run tests
+        run: python -m pytest -q
+        env:
+          # الاختبارات تستخدم SQLite في الذاكرة — لا أسرار مطلوبة.
+          PYTHONWARNINGS: ignore::DeprecationWarning
+
+  no-root:
+    name: التثبيت الذاتي بلا صلاحيات (بلا tesseract مسبق)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # نُخفي tesseract عن PATH لنُثبت أن self_install ينزّله بلا root
+      - name: Install python deps only
+        run: pip install -r requirements.txt
+
+      - name: self_install ---check
+        run: python self_install.py --check
+
+      - name: main.py يقلع ويشرح نقص التوكن
+        run: |
+          BOT_TOKEN="" python main.py 2>&1 | tee /tmp/out.txt
+          grep -q "BOT_TOKEN غير مُعدّ" /tmp/out.txt
+
+  shell:
+    name: shellcheck (setup.sh)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: bash syntax
+        run: bash -n setup.sh
+
+      - name: shellcheck
+        run: shellcheck -s bash setup.sh

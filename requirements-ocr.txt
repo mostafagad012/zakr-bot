@@ -1,0 +1,8 @@
+# Optional OCR stack. System binaries (tesseract + poppler) are separate.
+-r requirements.txt
+Pillow>=10.0
+pytesseract>=0.3.10
+pdf2image>=1.17
+numpy>=1.26
+# Optional perspective/dewarp enhancement; adds a comparatively large runtime.
+# onnxruntime>=1.17

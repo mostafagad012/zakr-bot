@@ -1,0 +1,9 @@
+# بناء خفيف افتراضيًا؛ OCR يتطلب حزم نظام إضافية ويُفعّل في بيئة تدعمه.
+[phases.setup]
+nixPkgs = ["bash"]
+
+[phases.install]
+cmds = ["pip install --no-cache-dir -r requirements.txt"]
+
+[start]
+cmd = "python main.py"
